@@ -105,7 +105,8 @@ def dl_ball_bearing(
 
 
 # version 2: order-domain IAS filtering (was a savgol + fixed 12.5 Hz time-domain low-pass).
-ball_bearing_dataset = Dataset("ball_bearing", prepare=dl_ball_bearing, version="2")
+# version 3: fixed order domain filter transfer function
+ball_bearing_dataset = Dataset("ball_bearing", prepare=dl_ball_bearing, version="3")
 
 _ball_bearing = dict(
     u_cols=["Acc_x"],

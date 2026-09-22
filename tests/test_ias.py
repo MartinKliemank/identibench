@@ -1,6 +1,8 @@
 """Tests for the IAS (instantaneous angular speed) datasets and benchmarks."""
 
 import dataclasses
+import os
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -111,33 +113,48 @@ def test_rising_edge_times_does_not_double_count_exact_zeros():
 # ───────────────────────── zebra tape reconstruction ─────────────────────────
 
 
-def _synthetic_zebra(stripes, ias_profile, fs=5_000.0, duration=200.0, drop=0.15, jitter_s=2e-5, seed=0):
+def _synthetic_zebra(
+    centres, ias_profile, fs=5_000.0, duration=200.0, drop=0.15, jitter_s=2e-5, seed=0, bar_spread=0.06, merge=0.0
+):
     """A synthetic planetary recording: 1PR carrier reference + irregular sun-shaft zebra tape.
 
-    Returns ``(t_ref, t_zebra, ias_profile_on_grid, n_samples)``. Stripe detections are randomly
-    dropped and their times jittered, so the fixture exercises the same gaps and timing noise the
-    template estimator has to cope with on the real tape.
-
-    The speed profiles passed in must vary slowly relative to one *carrier* revolution, as the
-    real rigs do (they modulate over tens of seconds against a ~0.5 s carrier period). The whole
-    method rests on interpolating sun angle between 1PR pulses, and the sun turns 5.77 times per
-    carrier revolution, so an interpolation error worth 1% of a carrier revolution already smears
-    a stripe across several of its neighbours.
+    Returns ``(recording, true_idx, ias_profile_on_grid, n_samples)``: ``recording`` is what
+    :func:`calibrate_zebra` takes (``t_ref``, ``t_rise``, ``t_fall``), and ``true_idx`` is the true
+    global stripe index of every rising edge, counting stripes in angular order from ``centres``.
+    Each dark bar is centred on its stripe and 0.35 of a spacing wide, give or take a per-stripe
+    ``bar_spread`` drawn per recording (as a remounted sensor reads the same tape). Bars are randomly
+    dropped, a fraction ``merge`` run into the next one, and edge times are jittered.
     """
     rng = np.random.default_rng(seed)
     t = np.arange(int(duration * fs)) / fs
     ias = ias_profile(t)
     theta = np.cumsum(ias) / fs  # sun revolutions
+    t_ref = np.interp(np.arange(1.0, np.floor(theta[-1] / planetary._SUN_PER_CARRIER_REV)), theta / planetary._SUN_PER_CARRIER_REV, t)
 
-    ratio = planetary._SUN_PER_CARRIER_REV
-    carrier = theta / ratio
-    t_ref = np.interp(np.arange(1.0, np.floor(carrier[-1])), carrier, t)
+    centres = np.sort(np.asarray(centres) % 1.0)
+    n = len(centres)
+    revs = np.arange(0.0, np.floor(theta[-1]))
+    centre_angle = (revs[:, None] + centres[None, :]).ravel()
+    half_width = np.tile(0.35 + rng.uniform(-bar_spread, bar_spread, n), len(revs)) / (2 * n)
+    true_idx = (revs[:, None] * n + np.arange(n)[None, :]).ravel().astype(np.int64)
+    rise_angle, fall_angle = centre_angle + half_width, centre_angle - half_width
+    keep = (fall_angle > theta[0]) & (rise_angle < theta[-1]) & (rng.random(len(centre_angle)) > drop)
+    merged = keep & np.r_[keep[1:], False] & (rng.random(len(keep)) < merge)  # bar k runs into bar k+1
+    has_rise, has_fall = keep & ~merged, keep & ~np.r_[False, merged[:-1]]
+    recording = dict(
+        t_ref=t_ref,
+        t_rise=np.interp(rise_angle[has_rise], theta, t) + rng.normal(0, jitter_s, has_rise.sum()),
+        t_fall=np.interp(fall_angle[has_fall], theta, t) + rng.normal(0, jitter_s, has_fall.sum()),
+    )
+    return recording, true_idx[has_rise], ias, len(t)
 
-    targets = (np.arange(0.0, np.floor(theta[-1]))[:, None] + np.asarray(stripes)[None, :]).ravel()
-    targets = np.sort(targets[(targets > theta[0]) & (targets < theta[-1])])
-    t_zebra = np.interp(targets, theta, t) + rng.normal(0, jitter_s, len(targets))
-    t_zebra = np.sort(t_zebra[rng.random(len(t_zebra)) > drop])
-    return t_ref, t_zebra, ias, len(t)
+
+def _irregular_tape(n_stripes, seed):
+    """Stripe angles nudged off a perfect grid, the way a real tape is. Kept within +-0.12 of a
+    spacing: the bootstrap fitter cannot resolve two stripes closer together than half the mean
+    spacing (see `_fit_template_from_phase`)."""
+    rng = np.random.default_rng(seed)
+    return np.sort((np.arange(n_stripes) + rng.uniform(-0.12, 0.12, n_stripes)) / n_stripes) % 1.0
 
 
 def _circular_spacings(angles):
@@ -168,13 +185,9 @@ def test_zebra_template_handles_detections_across_phase_wrap():
     np.testing.assert_allclose(ias, 10.0, rtol=1e-6)
 
 
-def test_zebra_round_trip_recovers_template_and_speed():
+def test_zebra_round_trip_recovers_labels_template_and_speed(monkeypatch):
     fs, n_stripes = 5_000.0, 76
-    rng = np.random.default_rng(7)
-    # Irregular stripe angles, nudged off a perfect grid the way a real tape is. Kept within
-    # +-0.12 of a spacing: the template fitter cannot resolve two stripes closer together than
-    # half the mean spacing (see `_fit_template_from_phase`).
-    planted = np.sort((np.arange(n_stripes) + rng.uniform(-0.12, 0.12, n_stripes)) / n_stripes) % 1.0
+    planted = _irregular_tape(n_stripes, seed=7)
 
     def fast(t):
         return 10.0 + 0.5 * np.sin(2 * np.pi * 0.02 * t)
@@ -182,33 +195,32 @@ def test_zebra_round_trip_recovers_template_and_speed():
     def slow(t):
         return 8.0 + 0.4 * np.sin(2 * np.pi * 0.015 * t)
 
-    # The second recording is clocked 0.31 rev around from the first, as a rig reassembled
-    # between test phases would be; pooling must align that out rather than splitting stripes.
-    files = [
-        _synthetic_zebra(planted, fast, fs=fs, seed=1),
-        _synthetic_zebra((planted + 0.31) % 1.0, slow, fs=fs, seed=2),
-    ]
-    phases, revs = [], []
-    for t_ref, t_zebra, _, _ in files:
-        phase, n_revs = planetary._zebra_phase(t_ref, t_zebra)
-        phases.append(phase)
-        revs.append(n_revs)
+    # The second recording is clocked 0.31 rev around from the first, as a rig reassembled between
+    # test phases would be, and reads every bar with a different width; the bootstrap must align the
+    # clocking so that stripe k is the same stripe in both, and calibrating at the centres must see
+    # through the widths. 1 % of bars merge into their neighbour.
+    recordings, truth = {}, {}
+    for stem, centres, profile, seed in (("a", planted, fast, 1), ("b", (planted + 0.31) % 1.0, slow, 2)):
+        recordings[stem], true_idx, ias, n_samples = _synthetic_zebra(centres, profile, fs=fs, seed=seed, merge=0.01)
+        truth[stem] = (true_idx, ias, n_samples)
+    monkeypatch.setattr(planetary, "_TEMPLATE_GROUPS", (("a", "b"),))  # calibrate the two together
 
-    template, counts, pooled_hist = planetary.pool_zebra_templates(phases, revs)
+    labels = planetary.calibrate_zebra(recordings)
 
-    # Every stripe is found, and the tape's geometry is recovered up to how it is clocked.
-    assert len(template) == n_stripes
-    np.testing.assert_allclose(_circular_spacings(template), _circular_spacings(planted), atol=2e-3)
-    assert counts.min() > 0.5 * sum(revs)  # ~85% of stripes detected per revolution
+    for stem, (t, idx, template) in labels.items():
+        true_idx, ias_true, n_samples = truth[stem]
+        # Every labelled centre carries its true stripe index, up to where the numbering starts.
+        offset = idx - true_idx[np.searchsorted(recordings[stem]["t_rise"], t)]
+        assert np.all(offset == offset[0])
+        assert len(t) > 0.97 * len(true_idx)
 
-    # ...and the reconstructed IAS tracks the planted speed of each recording.
-    for (t_ref, t_zebra, ias_true, n_samples), phase in zip(files, phases):
-        t_matched, idx_matched = planetary.match_zebra_to_template(
-            t_zebra, t_ref, template, phase_offset=planetary.zebra_phase_offset(phase, pooled_hist)
-        )
-        t_clean, idx_clean = planetary.drop_zebra_outliers(t_matched, idx_matched, template)
-        ias, sl = planetary.reconstruct_ias(t_clean, idx_clean, template, fs, n_samples)
+        # The calibrated stripe centres are the planted ones, up to which stripe is numbered 0 -- to
+        # far better than the rising edges, which differ from the centres by ~0.03 of a spacing.
+        misfit = [np.std((template - np.roll(planted, -s) + 0.5) % 1.0 - 0.5) for s in range(n_stripes)]
+        assert min(misfit) < 2e-5  # rev, i.e. 0.0015 of a spacing
 
+        # ...and the reconstructed IAS tracks the planted speed.
+        ias, sl = planetary.reconstruct_ias(t, idx, template, fs, n_samples)
         assert len(ias) == sl.stop - sl.start
         interior = slice(len(ias) // 20, -len(ias) // 20)  # filter transients at the ends
         got, want = ias[interior], ias_true[sl][interior]
@@ -224,25 +236,107 @@ def test_zebra_round_trip_recovers_template_and_speed():
         assert np.corrcoef(got, want)[0, 1] > 0.95
 
 
-def test_zebra_reconstruction_is_truncated_not_extrapolated():
-    """The span before the first matched stripe is dropped, never filled in."""
-    fs = 5_000.0
-    rng = np.random.default_rng(3)
-    planted = np.sort((np.arange(40) + rng.uniform(-0.12, 0.12, 40)) / 40) % 1.0
-    t_ref, t_zebra, _, n_samples = _synthetic_zebra(planted, lambda t: np.full_like(t, 9.0), fs=fs, seed=4)
-
-    phase, n_revs = planetary._zebra_phase(t_ref, t_zebra)
-    template, _, pooled_hist = planetary.pool_zebra_templates([phase], [n_revs])
-    t_matched, idx_matched = planetary.match_zebra_to_template(
-        t_zebra, t_ref, template, phase_offset=planetary.zebra_phase_offset(phase, pooled_hist)
+def test_count_zebra_stripes_survives_a_near_stop():
+    """Stripe labels stay exact through a stop and restart with a quarter of the stripes missing,
+    which labelling each pulse from the 1PR interpolated between its pulses gets wrong for well over
+    a thousand pulses."""
+    rec, true_idx, _, _ = _synthetic_zebra(
+        _irregular_tape(76, seed=11), lambda t: 10.0 - 8.5 * np.exp(-0.5 * ((t - 100.0) / 1.5) ** 2), seed=5, drop=0.25
     )
-    t_clean, idx_clean = planetary.drop_zebra_outliers(t_matched, idx_matched, template)
-    _, sl = planetary.reconstruct_ias(t_clean, idx_clean, template, fs, n_samples)
+    phase, n_revs = planetary._zebra_phase(rec["t_ref"], rec["t_rise"])
+    template, _, pooled_hist = planetary.pool_zebra_templates([phase], [n_revs])
 
-    # `_zebra_phase` discards the first ten 1PR reference pulses, so a real head is cut off.
-    assert sl.start / fs >= t_clean[0] - 1 / fs
-    assert sl.stop / fs <= t_clean[-1] + 1 / fs
+    t, idx, n_dropped = planetary.count_zebra_stripes(
+        rec["t_rise"], rec["t_ref"], template, planetary.zebra_phase_offset(phase, pooled_hist)
+    )
+
+    offset = idx - true_idx[np.searchsorted(rec["t_rise"], t)]
+    assert np.all(offset == offset[0])
+    assert len(t) > 0.95 * len(true_idx)
+
+
+def test_reference_events_time_the_dip_midpoint():
+    """A 1PR pulse is timed at the middle of its dip, moved earlier by the channel delay, whatever
+    the dip's width; a dip cut off by the start of the recording is skipped, not half-timed."""
+    fs = 10_000.0
+    t = np.arange(int(5 * fs)) / fs
+    centres = np.array([0.5, 1.7, 2.9, 4.1])
+    signal = np.where(t < 0.02, 0.5, 10.4)  # the recording starts inside a dip
+    for centre, half_width in zip(centres, (0.015, 0.03, 0.02, 0.025)):
+        # flat 0.5 V bottom, 4 ms linear flanks, clipped at 10.4 V like the real pickup
+        signal = np.minimum(signal, np.clip(0.5 + (np.abs(t - centre) - half_width) / 0.004 * 9.9, 0.5, 10.4))
+
+    events = planetary.reference_events(signal, fs)
+
+    np.testing.assert_allclose(events, centres - planetary._REF_DELAY_S, atol=1e-6)
+
+
+def test_zebra_reconstruction_is_truncated_not_extrapolated():
+    """The span before the first labelled stripe is dropped, never filled in."""
+    fs = 5_000.0
+    rec, _, _, n_samples = _synthetic_zebra(_irregular_tape(76, seed=3), lambda t: np.full_like(t, 9.0), fs=fs, seed=4)
+
+    ((t, idx, template),) = planetary.calibrate_zebra({"a": rec}).values()
+    _, sl = planetary.reconstruct_ias(t, idx, template, fs, n_samples)
+
+    # Counting starts at the first 1PR pulse, so a real head is cut off.
+    assert sl.start / fs >= t[0] - 1 / fs
+    assert sl.stop / fs <= t[-1] + 1 / fs
     assert sl.start > 0 and sl.stop < n_samples
+
+
+# The raw planetary recordings (the folder holding the archive's g1_crack/ and g2_crack/); the check
+# of the label pipeline against them runs only where this is set.
+_PLANETARY_RAW = os.environ.get("IDENTIBENCH_PLANETARY_RAW")
+
+# Per recording, as dataset version 4 was built: stripes labelled, and the rms timing residual of each
+# labelled stripe centre against its neighbours on the calibrated template (in stripe spacings).
+_PLANETARY_EXPECTED = {
+    "G1_P0_38400Hz": (602197, 0.0070),
+    "G1_P1_38400Hz": (449295, 0.0076),
+    "G1_P1_slow_38400Hz": (237779, 0.0214),
+    "G1_P2_38400Hz": (606805, 0.0052),
+    "G1_P3_38400Hz": (580061, 0.0072),
+    "G1_P4_38400Hz": (592069, 0.0053),
+    "G1_P5_38400Hz": (549604, 0.0070),
+    "G1_P6_38400Hz": (674792, 0.0053),
+    "G1_P7_38400Hz": (505329, 0.0099),
+    "G2_P0_38400Hz": (1068166, 0.0037),
+    "G2_P1_38400Hz": (917700, 0.0028),
+    "G2_P2_38400Hz": (814991, 0.0027),
+    "G2_P3_38400Hz": (891098, 0.0028),
+    "G2_P4_38400Hz": (711623, 0.0030),
+    "G2_P5_38400Hz": (753277, 0.0027),
+}
+
+
+@pytest.mark.skipif(_PLANETARY_RAW is None, reason="set IDENTIBENCH_PLANETARY_RAW to the raw planetary recordings")
+def test_planetary_labels_hold_up_on_the_real_recordings():
+    """At least as many stripes labelled, fitting the calibrated stripe positions at least as tightly,
+    as when version 4 was built. A mislabelled run both drops revolutions and fits worse."""
+    import scipy.io
+
+    recordings = {}
+    for f in sorted(Path(_PLANETARY_RAW).glob("*_crack/*.MAT")):
+        mat = scipy.io.loadmat(f, variable_names=["Channel_5_Data", "Channel_6_Data", "File_Header"])
+        fs = planetary._parse_fs(mat)
+        zebra = mat["Channel_5_Data"].squeeze().astype(float)
+        recordings[f.stem] = dict(
+            t_ref=planetary.reference_events(mat["Channel_6_Data"].squeeze(), fs),
+            t_rise=_common.rising_edge_times(zebra, fs),
+            t_fall=_common.rising_edge_times(-zebra, fs),
+        )
+
+    labels = planetary.calibrate_zebra(recordings)
+
+    assert labels.keys() == _PLANETARY_EXPECTED.keys()
+    for stem, (t, idx, template) in labels.items():
+        n_labelled, residual = _PLANETARY_EXPECTED[stem]
+        a = planetary._theta(idx, template)
+        between = t[:-2] + (t[2:] - t[:-2]) * (a[1:-1] - a[:-2]) / (a[2:] - a[:-2])
+        r = (t[1:-1] - between) / ((t[2:] - t[:-2]) / (idx[2:] - idx[:-2]))
+        assert len(t) >= 0.998 * n_labelled, stem
+        assert np.sqrt(np.mean(r**2)) <= 1.05 * residual, stem
 
 
 # ───────────────────────── seeded disturbances ─────────────────────────
@@ -641,7 +735,7 @@ def test_gridwise_step_matches_declared_label_bandwidth():
     # direction -- tightening it silently would multiply evaluation cost by over 100x.
     step = idb.ias_benchmarks["PlanetaryGearbox_GridwiseEstimation"].task.step_sec
     nyquist = 1 / (2 * planetary_gearbox._IAS_BANDWIDTH_HZ)
-    assert nyquist == pytest.approx(0.000835, abs=1e-5)
+    assert nyquist == pytest.approx(0.00114, abs=1e-5)
     assert step == 0.003 > nyquist
     for dataset_id in ("ball_bearing", "parallel_gearbox", "planetary_gearbox", "gas_foil_bearing"):
         assert dataset_id in idb.datasets.all_datasets

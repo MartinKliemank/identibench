@@ -215,7 +215,8 @@ def dl_parallel_gearbox(
 
 
 # version 2: order-domain IAS filtering (was a savgol + fixed 12.5 Hz time-domain low-pass).
-parallel_gearbox_dataset = Dataset("parallel_gearbox", prepare=dl_parallel_gearbox, version="2")
+# version 3: fixed order domain filter transfer function
+parallel_gearbox_dataset = Dataset("parallel_gearbox", prepare=dl_parallel_gearbox, version="3")
 
 _parallel_gearbox = dict(
     u_cols=["gearbox_vibration_x", "gearbox_vibration_y", "gearbox_vibration_z"],

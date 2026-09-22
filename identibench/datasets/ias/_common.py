@@ -127,7 +127,7 @@ def order_domain_lowpass(x: np.ndarray, cutoff_order: float, pulses_per_revoluti
     stated directly in orders (events per revolution) and makes the smoothing independent of
     how fast the shaft happens to be turning.
 
-    The stopband is ``min(4 * cutoff_order, 0.45 * ppr)`` at 60 dB, with 1 dB of passband
+    The stopband is ``min(4 * cutoff_order, 0.25 * ppr)`` at 60 dB, with 1 dB of passband
     ripple. Deriving it from the cutoff rather than from the Nyquist is what keeps the
     datasets comparable: a fixed ``0.25 * ppr`` stopband would hand the ball bearing a
     2nd-order filter (its Nyquist sits 54x above its cutoff) and the parallel gearbox a
@@ -151,14 +151,14 @@ def order_domain_lowpass(x: np.ndarray, cutoff_order: float, pulses_per_revoluti
             f"cutoff_order={cutoff_order} must lie strictly between 0 and the order-domain "
             f"Nyquist {nyquist} (pulses_per_revolution={pulses_per_revolution})"
         )
-    stopband = min(4 * cutoff_order, 0.45 * pulses_per_revolution)
+    stopband = min(4 * cutoff_order, 0.25 * pulses_per_revolution)
     if stopband <= cutoff_order:
         raise ValueError(
             f"stopband {stopband} collapsed onto cutoff_order={cutoff_order}; "
             f"pulses_per_revolution={pulses_per_revolution} is too small for this cutoff"
         )
-    butter_order = buttord(cutoff_order, stopband, 1, 60, fs=pulses_per_revolution)[0]
-    sos = butter(butter_order, cutoff_order, btype="low", output="sos", fs=pulses_per_revolution)
+    butter_order, wn = buttord(cutoff_order, stopband, 1.5, 30, fs=pulses_per_revolution)
+    sos = butter(butter_order, wn, btype="low", output="sos", fs=pulses_per_revolution)
     return sosfiltfilt(sos, x)
 
 

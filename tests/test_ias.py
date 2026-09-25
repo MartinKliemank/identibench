@@ -375,13 +375,54 @@ def test_add_disturbances_single_type_hits_full_snr():
     sig = np.sin(2 * np.pi * 35.0 * np.arange(int(fs)) / fs)
     ias_hz = np.full_like(sig, 20.0)
 
-    for kind in ("harmonic", "gaussian", "impulsive"):
+    for kind in ("harmonic", "gaussian", "impulsive", "bernoulli"):
         out = _common.add_disturbances(
             sig, fs, target_snr_db=0, rng=np.random.default_rng(0), ias_hz=ias_hz, disturbance_types=(kind,)
         )
         noise = out - sig
         snr_db = 10 * np.log10(np.mean(sig**2) / np.mean(noise**2))
         assert snr_db == pytest.approx(0, abs=2.0)
+
+
+def test_impulse_models_stay_bounded_and_sample_rate_independent():
+    """The two impulse components keep their shape across ``fs``.
+
+    The SNR normalisation hides both failure modes checked here: a single Levy sample
+    dominating the noise energy, and bernoulli arrivals or power split tracking ``fs``.
+    """
+    duration_s = 60.0  # matched across both rates, so arrival counts are comparable
+    top_share, impulse_share, arrival_rate = {}, {}, {}
+    for fs in (12_800.0, 51_200.0):
+        n = int(fs * duration_s)
+        sig = np.sin(2 * np.pi * 35.0 * np.arange(n) / fs)
+        ias_hz = np.full_like(sig, 20.0)
+        for kind in ("impulsive", "bernoulli"):
+            noise = (
+                _common.add_disturbances(
+                    sig, fs, target_snr_db=0, rng=np.random.default_rng(0), ias_hz=ias_hz, disturbance_types=(kind,)
+                )
+                - sig
+            )
+            energy = noise**2
+            if kind == "impulsive":
+                top_share[fs] = energy.max() / energy.sum()
+            else:
+                # Arrivals stand ~240 background sigmas tall, so 20 sigma separates them cleanly.
+                # Count rising edges, not samples: the fs/2.1 lowpass rings for tens of samples.
+                background_sigma = np.sqrt(energy.mean() * (1 - _common.IMPULSE_POWER_SHARE))
+                arrivals = np.abs(noise) > 20 * background_sigma
+                impulse_share[fs] = energy[arrivals].sum() / energy.sum()
+                arrival_rate[fs] = np.sum(np.diff(arrivals.astype(np.int8)) == 1) / duration_s
+
+    # Levy: no single sample may dominate the noise energy.
+    for fs, share in top_share.items():
+        assert share < 0.03, f"impulsive at fs={fs}: largest sample holds {share:.2%} of the noise energy"
+
+    # Bernoulli: rate and impulse/background power split must not track fs.
+    for fs, rate in arrival_rate.items():
+        assert rate == pytest.approx(_common.IMPULSE_RATE_HZ, rel=0.3), f"fs={fs}: {rate:.2f} Hz"
+    assert impulse_share[12_800.0] == pytest.approx(impulse_share[51_200.0], abs=0.1)
+    assert all(s > 0.5 for s in impulse_share.values()), impulse_share
 
 
 def test_harmonic_disturbance_frequency_tracks_ias_and_varies():
@@ -704,7 +745,7 @@ def test_registration():
     # per-dataset and derived from the label bandwidth, so pin the values (see ias/__init__).
     for key, expected_step in (
         ("BallBearing_GridwiseEstimation", 0.003),
-        ("ParallelGearbox_GridwiseEstimation", 0.1),
+        ("ParallelGearbox_GridwiseEstimation", 0.08),
         ("PlanetaryGearbox_GridwiseEstimation", 0.003),
         ("GasFoilBearing_GridwiseEstimation", 0.003),
     ):
@@ -735,7 +776,7 @@ def test_gridwise_step_matches_declared_label_bandwidth():
     # direction -- tightening it silently would multiply evaluation cost by over 100x.
     step = idb.ias_benchmarks["PlanetaryGearbox_GridwiseEstimation"].task.step_sec
     nyquist = 1 / (2 * planetary_gearbox._IAS_BANDWIDTH_HZ)
-    assert nyquist == pytest.approx(0.00114, abs=1e-5)
+    assert nyquist == pytest.approx(0.00131, abs=1e-5)  # 381.3 Hz, i.e. _CUTOFF_ORDER = 13
     assert step == 0.003 > nyquist
     for dataset_id in ("ball_bearing", "parallel_gearbox", "planetary_gearbox", "gas_foil_bearing"):
         assert dataset_id in idb.datasets.all_datasets

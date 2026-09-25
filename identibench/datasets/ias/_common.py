@@ -19,29 +19,52 @@ from ...utils import download_file, extract_archive, hdf_files_from_path
 # Synthetic-noise SNR levels of the disturbed test-set copies (dB).
 DISTURBANCE_LEVELS = [15, 7.5, 0, -7.5]
 
-# Disturbed-test-set variants: "combined" sums all three components below (noise power
-# split evenly across them); the other three isolate one component at 100% of the noise
-# power. Order here is also the per-level order used by `ias_test_sets` (combined, the
-# per-level headline, first).
-DISTURBANCE_VARIANTS: tuple[str, ...] = ("combined", "harmonic", "gaussian", "impulsive")
+# Disturbed-test-set variants: "combined" sums the harmonic/gaussian/impulsive components
+# (noise power split evenly across them); the other four isolate one component at 100% of
+# the noise power. Order here is also the per-level order used by `ias_test_sets`
+# (combined, the per-level headline, first).
+DISTURBANCE_VARIANTS: tuple[str, ...] = ("combined", "harmonic", "gaussian", "impulsive", "bernoulli")
 
 # What `add_disturbances(disturbance_types=...)` receives for each variant above.
 # "combined" is never passed to `add_disturbances` itself -- it is purely an
-# orchestration-layer name meaning "all three real component types at once".
+# orchestration-layer name for the mixture. "bernoulli" is an alternative impulse model to
+# "impulsive", so it is left out of the mixture to keep the two from confounding each other.
 _VARIANT_DISTURBANCE_TYPES: dict[str, tuple[str, ...]] = {
     "combined": ("harmonic", "gaussian", "impulsive"),
     "harmonic": ("harmonic",),
     "gaussian": ("gaussian",),
     "impulsive": ("impulsive",),
+    "bernoulli": ("bernoulli",),
 }
 
-# Harmonic disturbance: models a nearby machine running at a different RPM as a few
-# tones at ratio * IAS(t) and its low multiples, amplitude falling off as 1/k. The base
-# frequency wanders with a damped copy of the file's own IAS trajectory (scaled by
-# HARMONIC_VARIATION_FACTOR) rather than sitting still, so it can't be notch-filtered out.
-HARMONIC_IAS_RATIO = 1.5
+# Harmonic disturbance: models a nearby machine running at a different RPM as a few tones at
+# ratio * IAS(t) and its low multiples, amplitude falling off as 1/k. The ratio is irrational
+# so the tones never coincide with the shaft's own orders. The base frequency wanders with a
+# damped copy of the file's own IAS trajectory (scaled by HARMONIC_VARIATION_FACTOR) rather
+# than sitting still, so it can't be notch-filtered out.
+HARMONIC_IAS_RATIO = 3 / np.pi
 HARMONIC_COUNT = 3
-HARMONIC_VARIATION_FACTOR = 0.1
+HARMONIC_VARIATION_FACTOR = 0.102382384
+
+# Impulsive disturbance: heavy-tailed Levy-stable draws, clipped. With alpha < 2 the variance
+# is infinite, so without clipping a single sample can carry most of the noise energy and the
+# mean-square SNR normalisation below becomes meaningless. The clip is set by that behaviour
+# rather than by a tail quantile: at 600 the largest sample holds <1% of the noise energy on
+# the prepared recordings, while the noise stays strongly impulsive (kurtosis ~2400, crest ~70).
+# Note that `scipy.stats.levy_stable.ppf` saturates far in the tail (q >= 0.99999), so use the
+# asymptotic P(X > x) ~ (1+beta)/2 * C_a * x**-alpha for tail quantiles instead.
+IMPULSIVE_ALPHA = 1.4
+IMPULSIVE_BETA = -0.1
+IMPULSIVE_CLIP = 600.0
+
+# Bernoulli-Gaussian disturbance: a sparse train of large impulses on a quiet gaussian
+# background. It has finite variance by construction and fixes how often impulses arrive
+# separately from how large they are, so the SNR sweep only moves the overall amplitude.
+# The rate is in Hz rather than per sample so it means the same across sampling rates; 2 Hz
+# still gives the shortest recordings (10 s) ~20 impulses.
+IMPULSE_RATE_HZ = 2.0
+# Fraction of the component's noise power carried by the impulses rather than the background.
+IMPULSE_POWER_SHARE = 0.9
 
 
 @dataclass
@@ -127,11 +150,12 @@ def order_domain_lowpass(x: np.ndarray, cutoff_order: float, pulses_per_revoluti
     stated directly in orders (events per revolution) and makes the smoothing independent of
     how fast the shaft happens to be turning.
 
-    The stopband is ``min(4 * cutoff_order, 0.25 * ppr)`` at 60 dB, with 1 dB of passband
-    ripple. Deriving it from the cutoff rather than from the Nyquist is what keeps the
-    datasets comparable: a fixed ``0.25 * ppr`` stopband would hand the ball bearing a
-    2nd-order filter (its Nyquist sits 54x above its cutoff) and the parallel gearbox a
-    6th-order one, for no physical reason.
+    The stopband is ``min(4 * cutoff_order, 0.25 * ppr)``, specified to ``buttord`` as 1.5 dB
+    passband / 30 dB stopband per pass -- so after ``sosfiltfilt``'s two passes the cutoff order
+    is the -3 dB power point and the stopband is down 60 dB. Deriving it from the cutoff rather
+    than from the Nyquist is what keeps the datasets comparable: a fixed ``0.25 * ppr`` stopband
+    would hand the ball bearing a 2nd-order filter (its Nyquist sits 54x above its cutoff) and the
+    parallel gearbox a 6th-order one, for no physical reason.
 
     Args:
         x: Angle-domain sequence, uniformly sampled.
@@ -234,11 +258,12 @@ def add_disturbances(
     """Add a mix of noise components at a target SNR, each drawn from ``rng``.
 
     ``disturbance_types`` selects which of ``"harmonic"`` (a nearby machine running
-    at a different, wandering RPM), ``"gaussian"`` (white noise), and ``"impulsive"``
-    (Lévy-stable noise) to generate; the noise power implied by ``target_snr_db`` is
-    split evenly across however many types are requested, so a single-element tuple
-    gives that type 100% of the noise power. ``ias_hz`` is that recording's own
-    per-sample IAS trace (same shape as ``sig``), which anchors the harmonic
+    at a different, wandering RPM), ``"gaussian"`` (white noise), ``"impulsive"``
+    (clipped Lévy-stable noise) and ``"bernoulli"`` (a sparse Bernoulli-Gaussian impulse
+    train on a quiet background) to generate; the noise power implied by
+    ``target_snr_db`` is split evenly across however many types are requested, so a
+    single-element tuple gives that type 100% of the noise power. ``ias_hz`` is that
+    recording's own per-sample IAS trace (same shape as ``sig``), which anchors the harmonic
     component's base frequency to ``HARMONIC_IAS_RATIO`` times this file's own
     (wandering) IAS instead of a fixed absolute Hz value, so its relative spectral
     position is comparable across datasets with very different shaft speeds.
@@ -255,7 +280,7 @@ def add_disturbances(
     percentage = 1.0 / len(disturbance_types)
 
     disturbances = []
-    for kind in ("harmonic", "gaussian", "impulsive"):
+    for kind in ("harmonic", "gaussian", "impulsive", "bernoulli"):
         if kind not in disturbance_types:
             continue
         if kind == "harmonic":
@@ -276,10 +301,19 @@ def add_disturbances(
         elif kind == "gaussian":
             disturbances.append(rng.normal(0, 1, size=sig.shape))
         elif kind == "impulsive":
-            # TODO: why alpha=1.2?
-            disturbances.append(
-                stats.levy_stable.rvs(alpha=1.2, beta=0, loc=0, scale=1, size=sig.shape, random_state=rng)
+            raw = stats.levy_stable.rvs(
+                alpha=IMPULSIVE_ALPHA, beta=IMPULSIVE_BETA, loc=0, scale=1, size=sig.shape, random_state=rng
             )
+            disturbances.append(np.clip(raw, -IMPULSIVE_CLIP, IMPULSIVE_CLIP))
+        elif kind == "bernoulli":
+            p = IMPULSE_RATE_HZ / fs  # arrival probability per sample
+            # Impulses add onto a unit-variance background, so the component's power is
+            # 1 + p * sigma_i2; solve p * sigma_i2 / (1 + p * sigma_i2) == IMPULSE_POWER_SHARE.
+            # The absolute scale is set by the shared normalisation below.
+            sigma_i2 = IMPULSE_POWER_SHARE / (p * (1 - IMPULSE_POWER_SHARE))
+            background = rng.normal(0, 1, size=sig.shape)
+            impulses = rng.binomial(1, p, size=sig.shape) * rng.normal(0, np.sqrt(sigma_i2), size=sig.shape)
+            disturbances.append(background + impulses)
 
     # lowpass filter each noise to be within fs/2 to avoid aliasing
     disturbances = [
@@ -299,7 +333,7 @@ def add_disturbances(
 def _disturbance_rng(base_seed: int, stem: str, level: float, variant: str) -> np.random.Generator:
     """Per-(file, level, variant) deterministic generator, independent of iteration order.
 
-    The 4 variants for a given (file, level) deliberately do not share noise
+    The variants for a given (file, level) deliberately do not share noise
     realizations with each other -- each draws independently from its own seed.
     """
     return np.random.default_rng(base_seed ^ zlib.crc32(f"{stem}|{level}|{variant}".encode()))
@@ -324,7 +358,7 @@ def write_disturbed_test_sets(
     file and reused across every level/variant/vib_key for that file, since it
     is level- and variant-invariant. Each (file, level, variant) triple gets its
     own deterministic seed, so re-runs are byte-identical regardless of order,
-    and the 4 variants for a given (file, level) do not share noise
+    and the variants for a given (file, level) do not share noise
     realizations with each other.
     """
     test_files = hdf_files_from_path(dataset_path / "test")

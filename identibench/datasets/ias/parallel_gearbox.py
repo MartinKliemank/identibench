@@ -35,8 +35,8 @@ _INFO = DatasetInfo(
 _FS = 12800
 
 # Order-domain cutoff for the IAS, in orders of the *input* shaft (where the tacho sits).
-# At 1 pulse/rev this is all the resolution the sensor supports: the label is smoothed over
-# ~1 / _CUTOFF_ORDER revolutions. The order axis only reaches 0.5 here and the shared diagnostic
+# At 1 pulse/rev this is all the resolution the sensor supports: 0.08 orders means the label
+# is smoothed over ~12.5 revolutions. The order axis only reaches 0.5 here and the shared diagnostic
 # resolves it in 0.04-order steps, so this value is only determined to within that step.
 _CUTOFF_ORDER = 0.08
 _PPR = 1
@@ -44,7 +44,7 @@ _PPR = 1
 # Highest frequency the label retains. Careful with the shaft: the cutoff is in orders of the
 # INPUT shaft (where the tacho is), while the stored label is the middle shaft, so the input-shaft
 # max is the measured 15.38 Hz label max scaled back up by 95/29 = 50.39 Hz.
-_IAS_BANDWIDTH_HZ = 15.38 * 95 / 29 * _CUTOFF_ORDER  # 6.05 Hz
+_IAS_BANDWIDTH_HZ = 15.38 * 95 / 29 * _CUTOFF_ORDER  # 4.03 Hz
 
 # Seconds the speed channel lags the vibration in the `_FILES_TO_SHIFT` recordings.
 _SPEED_LAG_SEC = 0.82
@@ -217,8 +217,7 @@ def dl_parallel_gearbox(
 
 # version 2: order-domain IAS filtering (was a savgol + fixed 12.5 Hz time-domain low-pass).
 # version 3: fixed order domain filter transfer function
-# version 4: cutoff re-derived with the shared order-domain diagnostic; disturbed test sets rebuilt
-# (clipped Levy impulsive component, new bernoulli variant).
+# version 4: disturbed test sets rebuilt (clipped Levy impulsive component, new bernoulli variant).
 parallel_gearbox_dataset = Dataset("parallel_gearbox", prepare=dl_parallel_gearbox, version="4")
 
 _parallel_gearbox = dict(
@@ -242,10 +241,10 @@ BenchmarkParallelGearbox_GridwiseEstimation = BenchmarkSpec(
     # window_sec=3.0: the largest single window across every upstream method's search space
     # over all four IAS datasets (unlike the per-dataset WindowedEstimation windows above,
     # this one is kept uniform — it's only a context guarantee, not a tuned averaging window).
-    # step_sec: Nyquist for the label's retained band, _IAS_BANDWIDTH_HZ = 6.05 Hz -> 82.7 ms,
-    # rounded down to 80 ms (1.03x margin). A 1 PPR tacho simply carries very little bandwidth, so
+    # step_sec: Nyquist for the label's retained band, _IAS_BANDWIDTH_HZ = 4.03 Hz -> 124 ms,
+    # rounded down to 80 ms (1.55x margin). A 1 PPR tacho simply carries very little bandwidth, so
     # this is by far the coarsest of the four grids. Must be updated whenever _CUTOFF_ORDER changes.
-    task=GridwiseEstimation(window_sec=3.0, step_sec=0.08),
+    task=GridwiseEstimation(window_sec=3.0, step_sec=0.1),
     **_parallel_gearbox,
 )
 

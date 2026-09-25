@@ -40,7 +40,7 @@ _PPR = 1024
 
 # Highest frequency the label retains: IAS_max * cutoff_order, measured over all 60 recordings
 # (29.80 Hz on the encoder shaft, which is also the measured shaft -- no gearing on this rig).
-_IAS_BANDWIDTH_HZ = 29.80 * _CUTOFF_ORDER  # 132.9 Hz
+_IAS_BANDWIDTH_HZ = 29.80 * _CUTOFF_ORDER  # 129.9 Hz
 
 # Fixed upstream split (verbatim): file stems of the basic test and valid sets;
 # C* recordings (worn bearings) form the out-of-distribution wear set.
@@ -106,8 +106,8 @@ def dl_ball_bearing(
 
 # version 2: order-domain IAS filtering (was a savgol + fixed 12.5 Hz time-domain low-pass).
 # version 3: fixed order domain filter transfer function
-# versions 4-5: cutoff re-derived with the shared order-domain diagnostic (median of the per-file
-# crossings); disturbed test sets rebuilt (clipped Levy impulsive component, new bernoulli variant).
+# versions 4-5: cutoff 4.71 -> 4.36, re-derived with the shared order-domain diagnostic; disturbed
+# test sets rebuilt (clipped Levy impulsive component, new bernoulli variant).
 ball_bearing_dataset = Dataset("ball_bearing", prepare=dl_ball_bearing, version="5")
 
 _ball_bearing = dict(
@@ -131,8 +131,8 @@ BenchmarkBallBearing_GridwiseEstimation = BenchmarkSpec(
     # window_sec=3.0: the largest single window across every upstream method's search space
     # over all four IAS datasets (unlike the per-dataset WindowedEstimation windows above,
     # this one is kept uniform — it's only a context guarantee, not a tuned averaging window).
-    # step_sec: Nyquist for the label's retained band, _IAS_BANDWIDTH_HZ = 132.9 Hz
-    # -> 3.76 ms, rounded down to 3 ms (1.25x margin).
+    # step_sec: Nyquist for the label's retained band, _IAS_BANDWIDTH_HZ = 129.9 Hz
+    # -> 3.85 ms, rounded down to 3 ms (1.28x margin).
     task=GridwiseEstimation(window_sec=3.0, step_sec=0.003),
     **_ball_bearing,
 )

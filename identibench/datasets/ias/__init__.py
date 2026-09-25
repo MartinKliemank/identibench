@@ -67,7 +67,7 @@ differs in meaning from ``WindowedEstimation``'s).
 ``step_sec`` — the grid spacing — is **per dataset**, set from how much bandwidth that
 dataset's label actually retains. Each file records this as ``attrs["ias_bandwidth_hz"]``
 (``IAS_max × min(cutoff_order, ppr/2)``), and the spacing is Nyquist for it: ball bearing
-132.9 Hz → 3 ms, parallel gearbox 6.1 Hz → 80 ms, gas foil bearing 100.0 Hz → 3 ms. The
+129.9 Hz → 3 ms, parallel gearbox 4.0 Hz → 80 ms, gas foil bearing 100.0 Hz → 3 ms. The
 spread is real — a 1 PPR tacho on the parallel gearbox carries two orders of magnitude less
 bandwidth than the ball bearing's 1024-line encoder, so evaluating both on one grid served
 neither.

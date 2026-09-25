@@ -745,7 +745,7 @@ def test_registration():
     # per-dataset and derived from the label bandwidth, so pin the values (see ias/__init__).
     for key, expected_step in (
         ("BallBearing_GridwiseEstimation", 0.003),
-        ("ParallelGearbox_GridwiseEstimation", 0.08),
+        ("ParallelGearbox_GridwiseEstimation", 0.1),
         ("PlanetaryGearbox_GridwiseEstimation", 0.003),
         ("GasFoilBearing_GridwiseEstimation", 0.003),
     ):

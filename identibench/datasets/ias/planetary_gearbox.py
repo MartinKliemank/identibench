@@ -79,15 +79,18 @@ _SUN_TEETH, _RING_TEETH = 13, 62
 _SUN_PER_CARRIER_REV = (_SUN_TEETH + _RING_TEETH) / _SUN_TEETH
 
 # Order-domain cutoff for the reconstructed IAS, in orders of the sun shaft. The pooled
-# template resolves 76 stripes/rev, so the order-domain Nyquist is 38.
-_CUTOFF_ORDER = 11.32
+# template resolves 76 stripes/rev, so the order-domain Nyquist is 38. Set above the shared
+# diagnostic's per-file median (12.24) so the two strongest real lines -- the sun-planet mesh at
+# 10.75 orders and a sun-synchronous line at exactly 12 -- sit in the passband rather than the
+# transition band; the diagnostic's median-smoothed envelope cannot see narrow lines.
+_CUTOFF_ORDER = 13
 
 # Highest frequency the label retains: IAS_max * cutoff_order on the sun shaft. 29.33 Hz is the
 # peak across all 15 recordings (medians run 4.5-17.6 Hz); the 39.90 Hz peak of version 3 was a
 # mislabelled-pulse spike, not a real speed. This is by far the widest band of the four IAS
 # datasets -- the zebra tape resolves ~76x more per revolution than the 1PR pickup it replaced --
 # which is what drives both the evaluation grid and the model sample-rate floor.
-_IAS_BANDWIDTH_HZ = 29.33 * _CUTOFF_ORDER  # 440.0 Hz
+_IAS_BANDWIDTH_HZ = 29.33 * _CUTOFF_ORDER  # 381.3 Hz
 
 # The 1PR channel lags the zebra channel by this much: 0.35-0.50 ms on every recording, the same
 # for both flanks of the pickup's dip. Left in, it is a speed-proportional sun-phase error of up
@@ -688,7 +691,10 @@ def dl_planetary_gearbox(
 # version 4: stripes counted and anchored at delay-compensated 1PR pulses (was: each pulse labelled
 # from the interpolated reference), reconstructed from stripe centres with positions
 # self-calibrated per reassembly group (was: one bootstrap template for all recordings).
-planetary_gearbox_dataset = Dataset("planetary_gearbox", prepare=dl_planetary_gearbox, version="4")
+# version 5: corrected order-domain filter transfer function, cutoff 15 -> 11.32.
+# version 6: cutoff 11.32 -> 13 (keeps the mesh and order-12 lines in the passband); disturbed test
+# sets rebuilt (clipped Levy impulsive component, new bernoulli variant).
+planetary_gearbox_dataset = Dataset("planetary_gearbox", prepare=dl_planetary_gearbox, version="6")
 
 _planetary_gearbox = dict(
     u_cols=["Acc_Carrier", "Acc_Sun"],
@@ -711,10 +717,10 @@ BenchmarkPlanetaryGearbox_GridwiseEstimation = BenchmarkSpec(
     # window_sec=3.0: the largest single window across every upstream method's search space
     # over all four IAS datasets (unlike the per-dataset WindowedEstimation windows above,
     # this one is kept uniform — it's only a context guarantee, not a tuned averaging window).
-    # step_sec: the one dataset NOT sampled at Nyquist. _IAS_BANDWIDTH_HZ = 440.0 Hz would need
-    # 1.14 ms, i.e. up to ~0.81M query points per file and ~480 MB of diagnostics per run. Capped at
-    # 3 ms instead, which fully resolves 15 orders while the sun is below 11.1 Hz -- 60.4% of
-    # recorded time. That is a deliberate trade: pooled MAE is an unbiased estimate of the mean
+    # step_sec: the one dataset NOT sampled at Nyquist. _IAS_BANDWIDTH_HZ = 381.3 Hz would need
+    # 1.31 ms, i.e. up to ~0.71M query points per file and ~410 MB of diagnostics per run. Capped at
+    # 3 ms instead, which fully resolves the 13-order cutoff while the sun is below 12.8 Hz --
+    # 73.7% of recorded time. That is a deliberate trade: pooled MAE is an unbiased estimate of the mean
     # absolute error at ANY grid spacing, so a model that fails to track fast content is still
     # penalised at every query point; and 3 ms is already finer than the finest hop any
     # benchmarked method can emit (5 ms for MOPA/ViBES at their smallest window and largest

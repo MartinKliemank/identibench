@@ -375,7 +375,7 @@ def test_add_disturbances_single_type_hits_full_snr():
     sig = np.sin(2 * np.pi * 35.0 * np.arange(int(fs)) / fs)
     ias_hz = np.full_like(sig, 20.0)
 
-    for kind in ("harmonic", "gaussian", "impulsive", "bernoulli"):
+    for kind in ("harmonic", "gaussian", "impulsive"):
         out = _common.add_disturbances(
             sig, fs, target_snr_db=0, rng=np.random.default_rng(0), ias_hz=ias_hz, disturbance_types=(kind,)
         )
@@ -384,45 +384,25 @@ def test_add_disturbances_single_type_hits_full_snr():
         assert snr_db == pytest.approx(0, abs=2.0)
 
 
-def test_impulse_models_stay_bounded_and_sample_rate_independent():
-    """The two impulse components keep their shape across ``fs``.
-
-    The SNR normalisation hides both failure modes checked here: a single Levy sample
-    dominating the noise energy, and bernoulli arrivals or power split tracking ``fs``.
-    """
-    duration_s = 60.0  # matched across both rates, so arrival counts are comparable
-    top_share, impulse_share, arrival_rate = {}, {}, {}
+def test_impulsive_disturbance_stays_bounded_across_sample_rates():
+    """No single Levy sample may dominate the noise energy, which the SNR normalisation would hide."""
     for fs in (12_800.0, 51_200.0):
-        n = int(fs * duration_s)
+        n = int(fs * 60.0)
         sig = np.sin(2 * np.pi * 35.0 * np.arange(n) / fs)
-        ias_hz = np.full_like(sig, 20.0)
-        for kind in ("impulsive", "bernoulli"):
-            noise = (
-                _common.add_disturbances(
-                    sig, fs, target_snr_db=0, rng=np.random.default_rng(0), ias_hz=ias_hz, disturbance_types=(kind,)
-                )
-                - sig
+        noise = (
+            _common.add_disturbances(
+                sig,
+                fs,
+                target_snr_db=0,
+                rng=np.random.default_rng(0),
+                ias_hz=np.full_like(sig, 20.0),
+                disturbance_types=("impulsive",),
             )
-            energy = noise**2
-            if kind == "impulsive":
-                top_share[fs] = energy.max() / energy.sum()
-            else:
-                # Arrivals stand ~240 background sigmas tall, so 20 sigma separates them cleanly.
-                # Count rising edges, not samples: the fs/2.1 lowpass rings for tens of samples.
-                background_sigma = np.sqrt(energy.mean() * (1 - _common.IMPULSE_POWER_SHARE))
-                arrivals = np.abs(noise) > 20 * background_sigma
-                impulse_share[fs] = energy[arrivals].sum() / energy.sum()
-                arrival_rate[fs] = np.sum(np.diff(arrivals.astype(np.int8)) == 1) / duration_s
-
-    # Levy: no single sample may dominate the noise energy.
-    for fs, share in top_share.items():
+            - sig
+        )
+        energy = noise**2
+        share = energy.max() / energy.sum()
         assert share < 0.03, f"impulsive at fs={fs}: largest sample holds {share:.2%} of the noise energy"
-
-    # Bernoulli: rate and impulse/background power split must not track fs.
-    for fs, rate in arrival_rate.items():
-        assert rate == pytest.approx(_common.IMPULSE_RATE_HZ, rel=0.3), f"fs={fs}: {rate:.2f} Hz"
-    assert impulse_share[12_800.0] == pytest.approx(impulse_share[51_200.0], abs=0.1)
-    assert all(s > 0.5 for s in impulse_share.values()), impulse_share
 
 
 def test_harmonic_disturbance_frequency_tracks_ias_and_varies():

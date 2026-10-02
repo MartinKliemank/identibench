@@ -107,8 +107,9 @@ def dl_ball_bearing(
 # version 2: order-domain IAS filtering (was a savgol + fixed 12.5 Hz time-domain low-pass).
 # version 3: fixed order domain filter transfer function
 # versions 4-5: cutoff 4.71 -> 4.36, re-derived with the shared order-domain diagnostic; disturbed
-# test sets rebuilt (clipped Levy impulsive component, new bernoulli variant).
-ball_bearing_dataset = Dataset("ball_bearing", prepare=dl_ball_bearing, version="5")
+# test sets rebuilt (clipped Levy impulsive component).
+# version 6: removved bernoulli noise from disturbed test sets.
+ball_bearing_dataset = Dataset("ball_bearing", prepare=dl_ball_bearing, version="6")
 
 _ball_bearing = dict(
     u_cols=["Acc_x"],

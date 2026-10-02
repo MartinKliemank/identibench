@@ -20,21 +20,19 @@ from ...utils import download_file, extract_archive, hdf_files_from_path
 DISTURBANCE_LEVELS = [15, 7.5, 0, -7.5]
 
 # Disturbed-test-set variants: "combined" sums the harmonic/gaussian/impulsive components
-# (noise power split evenly across them); the other four isolate one component at 100% of
+# (noise power split evenly across them); the other three isolate one component at 100% of
 # the noise power. Order here is also the per-level order used by `ias_test_sets`
 # (combined, the per-level headline, first).
-DISTURBANCE_VARIANTS: tuple[str, ...] = ("combined", "harmonic", "gaussian", "impulsive", "bernoulli")
+DISTURBANCE_VARIANTS: tuple[str, ...] = ("combined", "harmonic", "gaussian", "impulsive")
 
 # What `add_disturbances(disturbance_types=...)` receives for each variant above.
 # "combined" is never passed to `add_disturbances` itself -- it is purely an
-# orchestration-layer name for the mixture. "bernoulli" is an alternative impulse model to
-# "impulsive", so it is left out of the mixture to keep the two from confounding each other.
+# orchestration-layer name for the mixture.
 _VARIANT_DISTURBANCE_TYPES: dict[str, tuple[str, ...]] = {
     "combined": ("harmonic", "gaussian", "impulsive"),
     "harmonic": ("harmonic",),
     "gaussian": ("gaussian",),
     "impulsive": ("impulsive",),
-    "bernoulli": ("bernoulli",),
 }
 
 # Harmonic disturbance: models a nearby machine running at a different RPM as a few tones at
@@ -56,15 +54,6 @@ HARMONIC_VARIATION_FACTOR = 0.102382384
 IMPULSIVE_ALPHA = 1.4
 IMPULSIVE_BETA = -0.1
 IMPULSIVE_CLIP = 600.0
-
-# Bernoulli-Gaussian disturbance: a sparse train of large impulses on a quiet gaussian
-# background. It has finite variance by construction and fixes how often impulses arrive
-# separately from how large they are, so the SNR sweep only moves the overall amplitude.
-# The rate is in Hz rather than per sample so it means the same across sampling rates; 2 Hz
-# still gives the shortest recordings (10 s) ~20 impulses.
-IMPULSE_RATE_HZ = 2.0
-# Fraction of the component's noise power carried by the impulses rather than the background.
-IMPULSE_POWER_SHARE = 0.9
 
 
 @dataclass
@@ -259,8 +248,7 @@ def add_disturbances(
 
     ``disturbance_types`` selects which of ``"harmonic"`` (a nearby machine running
     at a different, wandering RPM), ``"gaussian"`` (white noise), ``"impulsive"``
-    (clipped Lévy-stable noise) and ``"bernoulli"`` (a sparse Bernoulli-Gaussian impulse
-    train on a quiet background) to generate; the noise power implied by
+    (clipped Lévy-stable noise) to generate; the noise power implied by
     ``target_snr_db`` is split evenly across however many types are requested, so a
     single-element tuple gives that type 100% of the noise power. ``ias_hz`` is that
     recording's own per-sample IAS trace (same shape as ``sig``), which anchors the harmonic
@@ -280,7 +268,7 @@ def add_disturbances(
     percentage = 1.0 / len(disturbance_types)
 
     disturbances = []
-    for kind in ("harmonic", "gaussian", "impulsive", "bernoulli"):
+    for kind in ("harmonic", "gaussian", "impulsive"):
         if kind not in disturbance_types:
             continue
         if kind == "harmonic":
@@ -305,15 +293,6 @@ def add_disturbances(
                 alpha=IMPULSIVE_ALPHA, beta=IMPULSIVE_BETA, loc=0, scale=1, size=sig.shape, random_state=rng
             )
             disturbances.append(np.clip(raw, -IMPULSIVE_CLIP, IMPULSIVE_CLIP))
-        elif kind == "bernoulli":
-            p = IMPULSE_RATE_HZ / fs  # arrival probability per sample
-            # Impulses add onto a unit-variance background, so the component's power is
-            # 1 + p * sigma_i2; solve p * sigma_i2 / (1 + p * sigma_i2) == IMPULSE_POWER_SHARE.
-            # The absolute scale is set by the shared normalisation below.
-            sigma_i2 = IMPULSE_POWER_SHARE / (p * (1 - IMPULSE_POWER_SHARE))
-            background = rng.normal(0, 1, size=sig.shape)
-            impulses = rng.binomial(1, p, size=sig.shape) * rng.normal(0, np.sqrt(sigma_i2), size=sig.shape)
-            disturbances.append(background + impulses)
 
     # lowpass filter each noise to be within fs/2 to avoid aliasing
     disturbances = [

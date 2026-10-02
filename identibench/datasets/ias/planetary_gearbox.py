@@ -693,8 +693,9 @@ def dl_planetary_gearbox(
 # self-calibrated per reassembly group (was: one bootstrap template for all recordings).
 # version 5: corrected order-domain filter transfer function, cutoff 15 -> 11.32.
 # version 6: cutoff 11.32 -> 13 (keeps the mesh and order-12 lines in the passband); disturbed test
-# sets rebuilt (clipped Levy impulsive component, new bernoulli variant).
-planetary_gearbox_dataset = Dataset("planetary_gearbox", prepare=dl_planetary_gearbox, version="6")
+# sets rebuilt (clipped Levy impulsive component).
+# version 7: removed bernoulli noise from disturbed test sets.
+planetary_gearbox_dataset = Dataset("planetary_gearbox", prepare=dl_planetary_gearbox, version="7")
 
 _planetary_gearbox = dict(
     u_cols=["Acc_Carrier", "Acc_Sun"],

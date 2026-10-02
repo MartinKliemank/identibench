@@ -217,8 +217,9 @@ def dl_parallel_gearbox(
 
 # version 2: order-domain IAS filtering (was a savgol + fixed 12.5 Hz time-domain low-pass).
 # version 3: fixed order domain filter transfer function
-# version 4: disturbed test sets rebuilt (clipped Levy impulsive component, new bernoulli variant).
-parallel_gearbox_dataset = Dataset("parallel_gearbox", prepare=dl_parallel_gearbox, version="4")
+# version 4: disturbed test sets rebuilt (clipped Levy impulsive component).
+# version 5: removed bernoulli noise from disturbed test sets.
+parallel_gearbox_dataset = Dataset("parallel_gearbox", prepare=dl_parallel_gearbox, version="5")
 
 _parallel_gearbox = dict(
     u_cols=["gearbox_vibration_x", "gearbox_vibration_y", "gearbox_vibration_z"],

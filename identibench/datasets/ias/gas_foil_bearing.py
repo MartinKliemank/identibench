@@ -112,9 +112,9 @@ def dl_gas_foil_bearing(
 # version 2: the upstream pre-converted archive behind `_INFO.zip_url` was replaced. This
 # dataset's own preprocessing is unchanged -- its IAS comes from an analog RPM channel rather
 # than a pulse train, so the order-domain reference the other three moved to does not apply.
-# versions 3-4: label unchanged; disturbed test sets rebuilt (clipped Levy impulsive component,
-# new bernoulli variant).
-gas_foil_bearing_dataset = Dataset("gas_foil_bearing", prepare=dl_gas_foil_bearing, version="4")
+# versions 3-4: label unchanged; disturbed test sets rebuilt (clipped Levy impulsive component).
+# version 5: removed bernoulli noise from disturbed test sets.
+gas_foil_bearing_dataset = Dataset("gas_foil_bearing", prepare=dl_gas_foil_bearing, version="5")
 
 _gas_foil_bearing = dict(
     u_cols=["Acc_x", "Acc_y"],

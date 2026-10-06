@@ -219,7 +219,8 @@ def dl_parallel_gearbox(
 # version 3: fixed order domain filter transfer function
 # version 4: disturbed test sets rebuilt (clipped Levy impulsive component).
 # version 5: removed bernoulli noise from disturbed test sets.
-parallel_gearbox_dataset = Dataset("parallel_gearbox", prepare=dl_parallel_gearbox, version="5")
+# version 6: fix padtype of order domain lowpass
+parallel_gearbox_dataset = Dataset("parallel_gearbox", prepare=dl_parallel_gearbox, version="7")
 
 _parallel_gearbox = dict(
     u_cols=["gearbox_vibration_x", "gearbox_vibration_y", "gearbox_vibration_z"],

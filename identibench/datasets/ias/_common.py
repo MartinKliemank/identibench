@@ -172,7 +172,7 @@ def order_domain_lowpass(x: np.ndarray, cutoff_order: float, pulses_per_revoluti
         )
     butter_order, wn = buttord(cutoff_order, stopband, 1.5, 30, fs=pulses_per_revolution)
     sos = butter(butter_order, wn, btype="low", output="sos", fs=pulses_per_revolution)
-    return sosfiltfilt(sos, x)
+    return sosfiltfilt(sos, x, padtype="even", padlen=int(0.01 * len(x)))
 
 
 def encoder_pulse_to_ias(

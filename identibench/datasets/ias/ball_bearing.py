@@ -109,7 +109,8 @@ def dl_ball_bearing(
 # versions 4-5: cutoff 4.71 -> 4.36, re-derived with the shared order-domain diagnostic; disturbed
 # test sets rebuilt (clipped Levy impulsive component).
 # version 6: removved bernoulli noise from disturbed test sets.
-ball_bearing_dataset = Dataset("ball_bearing", prepare=dl_ball_bearing, version="6")
+# version 7: fix padtype of order domain lowpass
+ball_bearing_dataset = Dataset("ball_bearing", prepare=dl_ball_bearing, version="8")
 
 _ball_bearing = dict(
     u_cols=["Acc_x"],

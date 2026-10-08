@@ -40,7 +40,7 @@ _PPR = 1024
 
 # Highest frequency the label retains: IAS_max * cutoff_order, measured over all 60 recordings
 # (29.80 Hz on the encoder shaft, which is also the measured shaft -- no gearing on this rig).
-_IAS_BANDWIDTH_HZ = 29.80 * _CUTOFF_ORDER  # 129.9 Hz
+_IAS_BANDWIDTH_HZ = 30.05 * _CUTOFF_ORDER  # 129.9 Hz
 
 # Fixed upstream split (verbatim): file stems of the basic test and valid sets;
 # C* recordings (worn bearings) form the out-of-distribution wear set.

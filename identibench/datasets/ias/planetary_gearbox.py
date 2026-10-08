@@ -90,7 +90,7 @@ _CUTOFF_ORDER = 13
 # mislabelled-pulse spike, not a real speed. This is by far the widest band of the four IAS
 # datasets -- the zebra tape resolves ~76x more per revolution than the 1PR pickup it replaced --
 # which is what drives both the evaluation grid and the model sample-rate floor.
-_IAS_BANDWIDTH_HZ = 29.33 * _CUTOFF_ORDER  # 381.3 Hz
+_IAS_BANDWIDTH_HZ = 29.34 * _CUTOFF_ORDER  # 381.3 Hz
 
 # The 1PR channel lags the zebra channel by this much: 0.35-0.50 ms on every recording, the same
 # for both flanks of the pickup's dip. Left in, it is a speed-proportional sun-phase error of up

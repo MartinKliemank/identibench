@@ -28,17 +28,16 @@ from ._common import (
 
 _INFO = DatasetInfo(
     name="Gas_Foil_Bearing",
-    zip_url="https://tubcloud.tu-berlin.de/s/AsqHPYa2TK3d2t2/download",
+    zip_url="https://tubcloud.tu-berlin.de/s/G8oFpozTW64cs3X/download",
 )
-
 # e.g. Load1_1_UpDown11s_03.hdf5  or  Load2_1_2_Random2_01.hdf5
 _FILENAME_PATTERN = re.compile(r"^(Load\d+)_(\d+(?:_\d+)*)_([A-Za-z][A-Za-z0-9]*)_(\d{2})(\.hdf5)$")
 
 
 # Highest frequency the label retains. Unlike the other three this is not an order cutoff: the
-# IAS comes from an analog RPM channel that is low-pass filtered at 100 Hz in the time domain by
+# IAS comes from an analog RPM channel that is low-pass filtered at 40 Hz in the time domain by
 # the upstream converter.
-_IAS_BANDWIDTH_HZ = 100.0
+_IAS_BANDWIDTH_HZ = 40.0
 
 
 def _copy_with_idb_attrs(src: Path, dest_dir: Path) -> None:
@@ -114,8 +113,8 @@ def dl_gas_foil_bearing(
 # than a pulse train, so the order-domain reference the other three moved to does not apply.
 # versions 3-4: label unchanged; disturbed test sets rebuilt (clipped Levy impulsive component).
 # version 5: removed bernoulli noise from disturbed test sets.
-# version 6: fix padtype of order domain lowpass
-gas_foil_bearing_dataset = Dataset("gas_foil_bearing", prepare=dl_gas_foil_bearing, version="7")
+# version 8: lower lowpass filter
+gas_foil_bearing_dataset = Dataset("gas_foil_bearing", prepare=dl_gas_foil_bearing, version="8")
 
 _gas_foil_bearing = dict(
     u_cols=["Acc_x", "Acc_y"],
@@ -139,8 +138,8 @@ BenchmarkGasFoilBearing_GridwiseEstimation = BenchmarkSpec(
     # window_sec=3.0: the largest single window across every upstream method's search space
     # over all four IAS datasets (unlike the per-dataset WindowedEstimation windows above,
     # this one is kept uniform — it's only a context guarantee, not a tuned averaging window).
-    # step_sec: Nyquist for the label's retained band, _IAS_BANDWIDTH_HZ = 100.0 Hz -> 5.0 ms,
-    # taken at 3 ms to match the other fast datasets (1.67x margin).
+    # step_sec: Nyquist for the label's retained band, _IAS_BANDWIDTH_HZ = 40.0 Hz -> <12.5 ms,
+    # taken at 3 ms to match the other fast datasets (~4x margin).
     task=GridwiseEstimation(window_sec=3.0, step_sec=0.003),
     **_gas_foil_bearing,
 )

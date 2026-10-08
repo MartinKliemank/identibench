@@ -44,7 +44,7 @@ _PPR = 1
 # Highest frequency the label retains. Careful with the shaft: the cutoff is in orders of the
 # INPUT shaft (where the tacho is), while the stored label is the middle shaft, so the input-shaft
 # max is the measured 15.38 Hz label max scaled back up by 95/29 = 50.39 Hz.
-_IAS_BANDWIDTH_HZ = 15.38 * 95 / 29 * _CUTOFF_ORDER  # 4.03 Hz
+_IAS_BANDWIDTH_HZ = 15.29 * 95 / 29 * _CUTOFF_ORDER  # 4.03 Hz
 
 # Seconds the speed channel lags the vibration in the `_FILES_TO_SHIFT` recordings.
 _SPEED_LAG_SEC = 0.82

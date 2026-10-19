@@ -342,93 +342,124 @@ def test_planetary_labels_hold_up_on_the_real_recordings():
 # ───────────────────────── seeded disturbances ─────────────────────────
 
 
+def _coloured_noise(n, fs, seed):
+    """Broadband test signal: white noise through a one-pole 200 Hz low-pass (-28 dB at 5 kHz)."""
+    white = np.random.default_rng(seed).standard_normal(n)
+    f = np.fft.rfftfreq(n, 1 / fs)
+    return np.fft.irfft(np.fft.rfft(white) / np.sqrt(1 + (f / 200.0) ** 2), n=n)
+
+
+def _disturb(sig, fs, target_snr_db, seed, disturbance_types=("harmonic", "gaussian", "impulsive"), interferer=None):
+    """`add_disturbances` against the reference spectrum of `sig`, with a 20 Hz interferer by default."""
+    return _common.add_disturbances(
+        sig,
+        fs,
+        target_snr_db=target_snr_db,
+        rng=np.random.default_rng(seed),
+        interferer_ias_hz=np.full_like(sig, 20.0) if interferer is None else interferer,
+        ref=_common.ReferenceSpectrum.from_signal(sig, fs),
+        disturbance_types=disturbance_types,
+    )
+
+
 def test_add_disturbances_deterministic_and_seed_sensitive():
     fs = 10_000.0
-    sig = np.sin(2 * np.pi * 35.0 * np.arange(int(fs)) / fs)
-    ias_hz = np.full_like(sig, 20.0)
+    sig = _coloured_noise(int(fs), fs, seed=0)
 
-    out_a = _common.add_disturbances(sig, fs, target_snr_db=15, rng=np.random.default_rng(7), ias_hz=ias_hz)
-    out_b = _common.add_disturbances(sig, fs, target_snr_db=15, rng=np.random.default_rng(7), ias_hz=ias_hz)
-    out_c = _common.add_disturbances(sig, fs, target_snr_db=15, rng=np.random.default_rng(8), ias_hz=ias_hz)
-
-    np.testing.assert_array_equal(out_a, out_b)
-    assert not np.array_equal(out_a, out_c)
+    out_a = _disturb(sig, fs, 15, seed=7)
+    np.testing.assert_array_equal(out_a, _disturb(sig, fs, 15, seed=7))
+    assert not np.array_equal(out_a, _disturb(sig, fs, 15, seed=8))
 
 
-def test_add_disturbances_hits_target_snr():
+def test_shaped_disturbances_hit_target_snr_in_every_band():
+    """Gaussian and impulsive noise follow the signal's spectrum: the SNR is the target in each band and in total."""
     fs = 10_000.0
-    sig = np.sin(2 * np.pi * 35.0 * np.arange(int(fs)) / fs)
-    ias_hz = np.full_like(sig, 20.0)
+    n = int(fs * 10)
+    sig = _coloured_noise(n, fs, seed=0)
+    r = 2 ** (1 / 6)  # measured in 1/3-octave bands, wider than the 1/12-octave reference bands
+    centres = 50 * 2 ** (np.arange(0, 40) / 3)
+    centres = centres[centres * r < 0.4 * fs]
+    sig_ref = _common.ReferenceSpectrum.from_signal(sig, fs, resolution_hz=fs * 20 / n)
 
-    for target_snr_db in (15, 7.5, 0, -7.5):
-        out = _common.add_disturbances(
-            sig, fs, target_snr_db=target_snr_db, rng=np.random.default_rng(0), ias_hz=ias_hz
-        )
-        noise = out - sig
-        snr_db = 10 * np.log10(np.mean(sig**2) / np.mean(noise**2))
-        assert snr_db == pytest.approx(target_snr_db, abs=2.0)
+    for kind in ("gaussian", "impulsive"):
+        for target_snr_db in (15, -7.5):
+            noise = _disturb(sig, fs, target_snr_db, seed=1, disturbance_types=(kind,)) - sig
+            assert 10 * np.log10(np.var(sig) / np.mean(noise**2)) == pytest.approx(target_snr_db, abs=1e-6)
+            noise_ref = _common.ReferenceSpectrum.from_signal(noise, fs, resolution_hz=fs * 20 / n)
+            band_snr = 10 * np.log10(
+                sig_ref.band_power(centres / r, centres * r) / noise_ref.band_power(centres / r, centres * r)
+            )
+            np.testing.assert_allclose(band_snr, target_snr_db, atol=2.0, err_msg=f"{kind} at {target_snr_db} dB")
 
 
-def test_add_disturbances_single_type_hits_full_snr():
-    """A single-element disturbance_types tuple gets 100% of the noise power."""
+def test_combined_splits_the_noise_power_evenly():
     fs = 10_000.0
-    sig = np.sin(2 * np.pi * 35.0 * np.arange(int(fs)) / fs)
-    ias_hz = np.full_like(sig, 20.0)
+    sig = _coloured_noise(int(fs * 4), fs, seed=0)
 
-    for kind in ("harmonic", "gaussian", "impulsive"):
-        out = _common.add_disturbances(
-            sig, fs, target_snr_db=0, rng=np.random.default_rng(0), ias_hz=ias_hz, disturbance_types=(kind,)
-        )
-        noise = out - sig
-        snr_db = 10 * np.log10(np.mean(sig**2) / np.mean(noise**2))
-        assert snr_db == pytest.approx(0, abs=2.0)
+    noise = _disturb(sig, fs, 0, seed=1, disturbance_types=("gaussian", "impulsive")) - sig
+    assert 10 * np.log10(np.var(sig) / np.mean(noise**2)) == pytest.approx(0, abs=0.2)
 
 
 def test_impulsive_disturbance_stays_bounded_across_sample_rates():
     """No single Levy sample may dominate the noise energy, which the SNR normalisation would hide."""
     for fs in (12_800.0, 51_200.0):
-        n = int(fs * 60.0)
-        sig = np.sin(2 * np.pi * 35.0 * np.arange(n) / fs)
-        noise = (
-            _common.add_disturbances(
-                sig,
-                fs,
-                target_snr_db=0,
-                rng=np.random.default_rng(0),
-                ias_hz=np.full_like(sig, 20.0),
-                disturbance_types=("impulsive",),
-            )
-            - sig
-        )
+        sig = _coloured_noise(int(fs * 60.0), fs, seed=0)
+        noise = _disturb(sig, fs, 0, seed=0, disturbance_types=("impulsive",)) - sig
         energy = noise**2
         share = energy.max() / energy.sum()
         assert share < 0.03, f"impulsive at fs={fs}: largest sample holds {share:.2%} of the noise energy"
 
 
-def test_harmonic_disturbance_frequency_tracks_ias_and_varies():
-    """The harmonic component's instantaneous frequency wanders with IAS(t), not constant."""
+def test_harmonic_disturbance_follows_the_interferer():
+    """The comb runs at the interferer's speed, which rises here while the signal stays stationary."""
     fs = 5_000.0
     n = int(fs) * 4
-    sig = np.ones(n)  # nonzero power, but far from the harmonic frequencies below
+    sig = _coloured_noise(n, fs, seed=0)
     t = np.arange(n) / fs
-    # A slowly ramping IAS so the two halves of the recording have clearly different means.
-    ias_hz = 20.0 + 10.0 * (t / t[-1])
+    interferer = 20.0 + 10.0 * (t / t[-1])
 
-    out = _common.add_disturbances(
-        sig, fs, target_snr_db=0, rng=np.random.default_rng(0), ias_hz=ias_hz, disturbance_types=("harmonic",)
-    )
-    noise = out - sig  # isolate the added disturbance from the constant signal
+    noise = _disturb(sig, fs, 0, seed=0, disturbance_types=("harmonic",), interferer=interferer) - sig
 
     half = n // 2
     freqs = np.fft.rfftfreq(half, d=1 / fs)
-    first_half_peak = freqs[np.argmax(np.abs(np.fft.rfft(noise[:half])))]
-    second_half_peak = freqs[np.argmax(np.abs(np.fft.rfft(noise[half:])))]
+    # Line amplitudes follow the signal's band power, which grows with frequency on this spectrum, so
+    # the fundamental is found in a window that holds both halves' expected values, not as the global peak.
+    window = (freqs > 15.0) & (freqs < 35.0)
+    first_half_peak = freqs[window][np.argmax(np.abs(np.fft.rfft(noise[:half]))[window])]
+    second_half_peak = freqs[window][np.argmax(np.abs(np.fft.rfft(noise[half:]))[window])]
+    assert first_half_peak == pytest.approx(_common.HARMONIC_IAS_RATIO * np.mean(interferer[:half]), rel=0.05)
+    assert second_half_peak == pytest.approx(_common.HARMONIC_IAS_RATIO * np.mean(interferer[half:]), rel=0.05)
 
-    expected_first = _common.HARMONIC_IAS_RATIO * np.mean(ias_hz[:half])
-    expected_second = _common.HARMONIC_IAS_RATIO * np.mean(ias_hz[half:])
-    assert first_half_peak == pytest.approx(expected_first, rel=0.2)
-    assert second_half_peak == pytest.approx(expected_second, rel=0.2)
-    assert second_half_peak > first_half_peak  # tracks the rising IAS
+
+def test_harmonic_lines_sit_at_the_target_snr_in_their_band():
+    """Each line carries the target fraction of the signal power in the 1/12-octave band around it."""
+    fs, target_snr_db = 2_000.0, 0.0
+    n = int(fs * 200)
+    sig = _coloured_noise(n, fs, seed=0)
+    f_t = _common.HARMONIC_IAS_RATIO * 20.0
+    noise = _disturb(sig, fs, target_snr_db, seed=1, disturbance_types=("harmonic",)) - sig
+
+    t = np.arange(n) / fs
+    r = 2 ** (_common.BAND_OCTAVES / 2)
+    sig_ref = _common.ReferenceSpectrum.from_signal(sig, fs, resolution_hz=0.05)  # finer than the generator's
+    for k in (1, 2, 3, 32):  # isolated lines, and one that shares its band with neighbours
+        f_k = k * f_t
+        line_power = np.abs(2 * np.mean(noise * np.exp(-2j * np.pi * f_k * t))) ** 2 / 2
+        band_snr = 10 * np.log10(sig_ref.band_power(f_k / r, f_k * r) / line_power)
+        shared = 10 * np.log10(max(1.0, k * (r - 1 / r)))  # the band's budget is split over its lines
+        assert band_snr == pytest.approx(target_snr_db + shared, abs=1.0), f"line {k}"
+
+
+def test_interferer_does_not_follow_the_own_speed_profile():
+    """Even when the other recording runs the same periodic profile, the chosen offset decorrelates it."""
+    fs = 100.0
+    t = np.arange(int(fs * 20)) / fs
+    profile = 300 + 200 * np.abs(((t / 5.0) % 1) * 2 - 1)  # 5 s up/down triangle, as in the GFB runs
+
+    interferer = _common.interferer_ias(profile, fs, profile, fs, np.random.default_rng(0))
+
+    assert interferer.shape == profile.shape
+    assert abs(np.corrcoef(interferer, profile)[0, 1]) < 0.3
 
 
 def _write_ias_file(path, ias, vib_channels, fs=1000.0):
@@ -459,6 +490,31 @@ def test_write_disturbed_test_sets_reproducible(tmp_path):
                     np.testing.assert_array_equal(fa["Acc_x"][:], fb["Acc_x"][:])
                     # IAS target is untouched
                     np.testing.assert_array_equal(fa["IAS"][:], fb["IAS"][:])
+
+
+def test_writer_runs_the_comb_at_another_recordings_speed(tmp_path):
+    """The harmonic disturbance of each file sits at the other file's speed, never at its own."""
+    fs, n = 1000.0, 20_000
+    speeds = {"rec_0": 10.0, "rec_1": 37.0}
+    for i, (stem, speed) in enumerate(speeds.items()):
+        _write_ias_file(tmp_path / "test" / f"{stem}.hdf5", np.full(n, speed), {"Acc_x": _coloured_noise(n, fs, i)})
+
+    _common.write_disturbed_test_sets(tmp_path, noise_levels=[0], vib_keys=["Acc_x"])
+
+    freqs = np.fft.rfftfreq(n, 1 / fs)
+    for stem, other in (("rec_0", "rec_1"), ("rec_1", "rec_0")):
+        with (
+            h5py.File(tmp_path / "test" / f"{stem}.hdf5") as clean,
+            h5py.File(tmp_path / "test_disturbed_0dB_harmonic" / f"{stem}.hdf5") as disturbed,
+        ):
+            spectrum = np.abs(np.fft.rfft(disturbed["Acc_x"][:] - clean["Acc_x"][:])) ** 2
+
+        def power_near(f, spectrum=spectrum):
+            return spectrum[np.abs(freqs - f) < 0.5].sum()
+
+        assert power_near(_common.HARMONIC_IAS_RATIO * speeds[other]) > 100 * power_near(
+            _common.HARMONIC_IAS_RATIO * speeds[stem]
+        ), stem
 
 
 def test_disturbed_copies_differ_per_file_and_level(tmp_path):

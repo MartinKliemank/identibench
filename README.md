@@ -207,8 +207,18 @@ revolution-based window would have cut to a fraction of that.
 
 Each dataset exposes several named test conditions: `basic` (in-distribution —
 the headline `metric_score`), `wear` (out-of-distribution fault severities;
-absent for the gas foil bearing), and `disturbed_{15,7.5,0}dB` (copies of
-`basic` with reproducible synthetic sensor noise at decreasing SNR). All
+absent for the gas foil bearing), and `disturbed_{15,7.5,0,-7.5}dB_{variant}`
+(copies of `basic` with reproducible synthetic disturbances at decreasing SNR).
+The variants are `combined` (all three components, noise power split evenly),
+`harmonic` (a nearby machine: a line comb running at the speed profile of
+another recording at a clearly different speed, so it carries no information
+about the file's own label), `gaussian` and `impulsive` (clipped Lévy-stable).
+The SNR is defined per 1/12-octave band: every disturbance is shaped like the
+clean signal's long-term spectrum, so on average over the bands a level means
+the same at any frequency, sampling rate or decimation (bands right beside a
+strong spectral line get more noise than their own power warrants). For the
+gaussian and impulsive components the total SNR equals the level as well; the
+harmonic comb only fills the bands that contain one of its lines. All
 conditions are scored into `result["test_sets"]`.
 
 These live in `identibench.datasets.ias` and the `idb.ias_benchmarks` registry.
@@ -520,7 +530,11 @@ direct interaction or adding new datasets.
 - **Download & Cache:** Data is downloaded automatically when a
   benchmark requires it and cached locally to avoid re-downloads. The
   `identibench.datasets.download_all_datasets` function can fetch all
-  datasets at once.
+  datasets at once. Zip extraction and the IAS datasets' disturbed test
+  sets run in parallel on the CPUs available to the process (on a cluster:
+  the job's allocation), capped at 8; set `IDENTIBENCH_WORKERS` to change
+  the count. A disturbed-test-set worker holds ~120 bytes per sample of its
+  largest channel (~4.3 GB for a planetary gearbox recording).
 - **File Format:** Processed time-series data is stored in the **HDF5
   (`.hdf5`)** format.
 - **HDF5 Structure:**

@@ -110,7 +110,10 @@ def dl_ball_bearing(
 # test sets rebuilt (clipped Levy impulsive component).
 # version 6: removved bernoulli noise from disturbed test sets.
 # version 7: fix padtype of order domain lowpass
-ball_bearing_dataset = Dataset("ball_bearing", prepare=dl_ball_bearing, version="8")
+# version 9: disturbed test sets rebuilt: the harmonic interferer runs at another test file's
+# speed profile (was tied to this file's own IAS), and the SNR is defined per 1/12-octave band, with the noise
+# shaped like the signal's spectrum (was white noise against the total power).
+ball_bearing_dataset = Dataset("ball_bearing", prepare=dl_ball_bearing, version="9")
 
 _ball_bearing = dict(
     u_cols=["Acc_x"],

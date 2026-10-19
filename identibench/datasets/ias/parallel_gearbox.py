@@ -220,7 +220,10 @@ def dl_parallel_gearbox(
 # version 4: disturbed test sets rebuilt (clipped Levy impulsive component).
 # version 5: removed bernoulli noise from disturbed test sets.
 # version 6: fix padtype of order domain lowpass
-parallel_gearbox_dataset = Dataset("parallel_gearbox", prepare=dl_parallel_gearbox, version="7")
+# version 8: disturbed test sets rebuilt: the harmonic interferer runs at another test file's
+# speed profile (was tied to this file's own IAS), and the SNR is defined per 1/12-octave band, with the noise
+# shaped like the signal's spectrum (was white noise against the total power).
+parallel_gearbox_dataset = Dataset("parallel_gearbox", prepare=dl_parallel_gearbox, version="8")
 
 _parallel_gearbox = dict(
     u_cols=["gearbox_vibration_x", "gearbox_vibration_y", "gearbox_vibration_z"],

@@ -114,7 +114,10 @@ def dl_gas_foil_bearing(
 # versions 3-4: label unchanged; disturbed test sets rebuilt (clipped Levy impulsive component).
 # version 5: removed bernoulli noise from disturbed test sets.
 # version 8: lower lowpass filter
-gas_foil_bearing_dataset = Dataset("gas_foil_bearing", prepare=dl_gas_foil_bearing, version="8")
+# version 9: disturbed test sets rebuilt: the harmonic interferer runs at another test file's
+# speed profile (was tied to this file's own IAS), and the SNR is defined per 1/12-octave band, with the noise
+# shaped like the signal's spectrum (was white noise against the total power).
+gas_foil_bearing_dataset = Dataset("gas_foil_bearing", prepare=dl_gas_foil_bearing, version="9")
 
 _gas_foil_bearing = dict(
     u_cols=["Acc_x", "Acc_y"],

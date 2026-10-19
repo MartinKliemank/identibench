@@ -1,9 +1,12 @@
 """Shared download/prep helpers for the IAS (instantaneous angular speed) datasets."""
 
+import multiprocessing
 import shutil
 import tempfile
 import zlib
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 
 import h5py
@@ -14,9 +17,10 @@ from scipy.signal import butter, buttord, sosfiltfilt
 from tqdm import tqdm
 
 from ...dataset import Dataset
-from ...utils import download_file, extract_archive, hdf_files_from_path
+from ...utils import download_file, extract_archive, hdf_files_from_path, preparation_workers
 
-# Synthetic-noise SNR levels of the disturbed test-set copies (dB).
+# Synthetic-disturbance SNR levels of the disturbed test-set copies (dB), defined per frequency band
+# (see BAND_OCTAVES).
 DISTURBANCE_LEVELS = [15, 7.5, 0, -7.5]
 
 # Disturbed-test-set variants: "combined" sums the harmonic/gaussian/impulsive components
@@ -35,20 +39,44 @@ _VARIANT_DISTURBANCE_TYPES: dict[str, tuple[str, ...]] = {
     "impulsive": ("impulsive",),
 }
 
-# Harmonic disturbance: models a nearby machine running at a different RPM as a few tones at
-# ratio * IAS(t) and its low multiples, amplitude falling off as 1/k. The ratio is irrational
-# so the tones never coincide with the shaft's own orders. The base frequency wanders with a
-# damped copy of the file's own IAS trajectory (scaled by HARMONIC_VARIATION_FACTOR) rather
-# than sitting still, so it can't be notch-filtered out.
-HARMONIC_IAS_RATIO = 3 / np.pi
-HARMONIC_COUNT = 3
-HARMONIC_VARIATION_FACTOR = 0.102382384
+# SNR is defined per frequency band, not against the total power: in every BAND_OCTAVES-wide band a
+# disturbance carries 10**(-snr/10) times the clean signal's power in that band. Against the total
+# power, white noise is worth very different amounts to different datasets and methods -- most of it
+# lands outside the band a decimating model keeps, or where the signal has no content -- so the same
+# nominal 15 dB came out between -18 and +29 dB inside the bands the HPO_6 models use. The level holds
+# on average over the bands: smoothing (and the Welch main lobe) spreads a strong line's power over its
+# neighbourhood, so the bands right beside an isolated strong line (planetary 49 Hz line, gas foil
+# bearing 1x) get more noise than their own power warrants -- up to ~20 dB in 1/12-octave bands, in
+# bands holding a few percent of the signal power. 1/12 rather than the usual 1/3 octave keeps that
+# region to about +-3 % of the line.
+BAND_OCTAVES = 1 / 12
+# Resolution of the long-term clean spectrum the disturbances are scaled to. The Welch bins come out at
+# 0.29-0.39 Hz on these datasets (a power of two near fs / REF_RESOLUTION_HZ samples); below ~5-7 Hz a
+# 1/12-octave band is narrower than one bin and is widened to it.
+REF_RESOLUTION_HZ = 0.5
 
-# Impulsive disturbance: heavy-tailed Levy-stable draws, clipped. With alpha < 2 the variance
-# is infinite, so without clipping a single sample can carry most of the noise energy and the
-# mean-square SNR normalisation below becomes meaningless. The clip is set by that behaviour
-# rather than by a tail quantile: at 600 the largest sample holds <1% of the noise energy on
-# the prepared recordings, while the noise stays strongly impulsive (kurtosis ~2400, crest ~70).
+# Harmonic disturbance: a nearby machine, i.e. a comb of HARMONIC_COUNT lines at
+# k * HARMONIC_IAS_RATIO * IAS_other(t). The speed profile IAS_other is the IAS label of a *different*
+# recording (`interferer_ias`), never the file's own: a tone tied to the file's own mean speed lets an
+# estimator that picks the strongest low-frequency peak score better than on the clean signal. The
+# comb ends at HARMONIC_COUNT * f_t (~150 Hz on the parallel gearbox, ~560 Hz on the ball bearing,
+# ~14 kHz on the gas foil bearing): that covers the bands the low-rate models use, but there is no
+# harmonic noise above it, so the harmonic variant's total SNR is well above the nominal level. Each
+# line costs one sine evaluation over the whole recording.
+HARMONIC_IAS_RATIO = 3 / np.pi
+HARMONIC_COUNT = 32
+# The other recording must also run at a different speed: recordings made at the same setpoint (the
+# parallel gearbox's 10/20 Nm pairs) would put the comb's first line back at ~0.95x the own speed.
+# `write_disturbed_test_sets` takes the next test file whose mean speed differs by at least this
+# fraction, else the one that differs most.
+INTERFERER_MIN_SPEED_GAP = 0.2
+
+# Impulsive disturbance: heavy-tailed Levy-stable draws, clipped, then shaped like the gaussian
+# component. With alpha < 2 the variance is infinite, so without clipping a single sample can carry
+# most of the noise energy and the mean-square SNR normalisation becomes meaningless. The clip is set
+# by that behaviour rather than by a tail quantile: at 600 the largest sample holds <1% of the noise
+# energy on the prepared recordings. Shaping spreads each impulse over the signal's band, which lowers
+# the kurtosis, most where the spectrum is narrowest.
 # Note that `scipy.stats.levy_stable.ppf` saturates far in the tail (q >= 0.99999), so use the
 # asymptotic P(X > x) ~ (1+beta)/2 * C_a * x**-alpha for tail quantiles instead.
 IMPULSIVE_ALPHA = 1.4
@@ -236,77 +264,192 @@ def save_signals_hdf5(
         f.attrs["ias_bandwidth_hz"] = float(ias_bandwidth_hz)
 
 
+@dataclass
+class ReferenceSpectrum:
+    """Long-term spectrum of one clean channel: band powers and the noise-shaping filter.
+
+    Built once per (file, channel) with :meth:`from_signal` and shared by every level and variant.
+
+    Attributes:
+        fs: Sampling rate of the channel in Hz.
+        var: Variance of the channel (its total power with the mean removed).
+        f: Welch bin frequencies in Hz, ``0 .. fs/2``.
+        cum: Signal power below each ``f`` (trapezoid integral of the one-sided PSD).
+        s_smooth: PSD averaged over a ``BAND_OCTAVES``-wide band around each ``f``, never narrower
+            than one bin.
+    """
+
+    fs: float
+    var: float
+    f: np.ndarray
+    cum: np.ndarray
+    s_smooth: np.ndarray
+
+    @classmethod
+    def from_signal(cls, sig: np.ndarray, fs: float, resolution_hz: float = REF_RESOLUTION_HZ) -> "ReferenceSpectrum":
+        """Welch spectrum of ``sig`` at ``resolution_hz``, coarsened until two segment lengths fit.
+
+        Args:
+            sig: Clean 1-D channel.
+            fs: Its sampling rate in Hz.
+            resolution_hz: Target frequency resolution in Hz.
+
+        Returns:
+            The reference spectrum of ``sig``.
+        """
+        x = np.asarray(sig, dtype=np.float64)
+        x = x - x.mean()
+        nperseg = 1 << int(np.ceil(np.log2(fs / resolution_hz)))
+        while nperseg > max(len(x) // 2, 16):
+            nperseg //= 2
+        f, s = scipy.signal.welch(x, fs=fs, window="hann", nperseg=nperseg, noverlap=nperseg // 2, detrend=False)
+        cum = np.concatenate([[0.0], np.cumsum(0.5 * (s[1:] + s[:-1]) * f[1])])
+        # Constant-Q smoothing: geometric band around f, but never narrower than one bin.
+        r = 2 ** (BAND_OCTAVES / 2)
+        lo = np.clip(np.minimum(f / r, f - f[1] / 2), 0, fs / 2)
+        hi = np.clip(np.maximum(f * r, f + f[1] / 2), 0, fs / 2)
+        s_smooth = (np.interp(hi, f, cum) - np.interp(lo, f, cum)) / (hi - lo)
+        return cls(fs=fs, var=float(x.var()), f=f, cum=cum, s_smooth=s_smooth)
+
+    def band_power(self, f_lo: np.ndarray, f_hi: np.ndarray) -> np.ndarray:
+        """Signal power between ``f_lo`` and ``f_hi`` (Hz), elementwise."""
+        return np.interp(f_hi, self.f, self.cum) - np.interp(f_lo, self.f, self.cum)
+
+    @cached_property
+    def fir(self) -> np.ndarray:
+        """Zero-phase FIR whose magnitude response is the square root of the smoothed PSD."""
+        n = 2 * (len(self.f) - 1)
+        h = np.fft.fftshift(np.fft.irfft(np.sqrt(self.s_smooth), n=n))
+        return h * scipy.signal.windows.hann(n, sym=False)
+
+
+def interferer_ias(
+    own_ias: np.ndarray,
+    fs: float,
+    other_ias: np.ndarray,
+    other_fs: float,
+    rng: np.random.Generator,
+    n_candidates: int = 16,
+) -> np.ndarray:
+    """Speed trace of the interfering machine: another recording's IAS at a random time offset.
+
+    Of ``n_candidates`` random offsets (wrapping around the other recording) the one least
+    correlated with ``own_ias`` is kept, so the interferer cannot follow this file's speed profile
+    even when both recordings run the same, e.g. periodic up/down, profile.
+
+    Args:
+        own_ias: IAS label of the recording being disturbed (Hz), one value per sample.
+        fs: Sampling rate of ``own_ias`` in Hz.
+        other_ias: IAS label of a different recording (Hz). The same recording also works, as a
+            shifted copy, for a test split with a single file.
+        other_fs: Sampling rate of ``other_ias`` in Hz.
+        rng: Source of the offsets.
+        n_candidates: Number of random offsets to choose from.
+
+    Returns:
+        The interferer's speed in Hz, same length as ``own_ias``.
+    """
+    t = np.arange(len(own_ias)) / fs
+    t_other = np.arange(len(other_ias)) / other_fs
+    duration = len(other_ias) / other_fs
+    probe = np.linspace(0, len(own_ias) - 1, 20000).astype(int)
+    best_shift, best_corr = None, np.inf
+    for shift in rng.uniform(0, duration, size=n_candidates):
+        cand = np.interp((t[probe] + shift) % duration, t_other, other_ias)
+        with np.errstate(invalid="ignore", divide="ignore"):  # a constant trace has no correlation
+            corr = abs(np.nan_to_num(np.corrcoef(cand, own_ias[probe])[0, 1]))
+        if corr < best_corr:
+            best_shift, best_corr = shift, corr
+    return np.interp((t + best_shift) % duration, t_other, other_ias)
+
+
 def add_disturbances(
     sig: np.ndarray,
     fs: float,
     target_snr_db: float,
     rng: np.random.Generator,
-    ias_hz: np.ndarray,
+    interferer_ias_hz: np.ndarray,
+    ref: ReferenceSpectrum,
     disturbance_types: tuple[str, ...] = ("harmonic", "gaussian", "impulsive"),
 ) -> np.ndarray:
-    """Add a mix of noise components at a target SNR, each drawn from ``rng``.
+    """Add disturbances at ``target_snr_db`` per ``BAND_OCTAVES``-wide band, each drawn from ``rng``.
 
-    ``disturbance_types`` selects which of ``"harmonic"`` (a nearby machine running
-    at a different, wandering RPM), ``"gaussian"`` (white noise), ``"impulsive"``
-    (clipped Lévy-stable noise) to generate; the noise power implied by
-    ``target_snr_db`` is split evenly across however many types are requested, so a
-    single-element tuple gives that type 100% of the noise power. ``ias_hz`` is that
-    recording's own per-sample IAS trace (same shape as ``sig``), which anchors the harmonic
-    component's base frequency to ``HARMONIC_IAS_RATIO`` times this file's own
-    (wandering) IAS instead of a fixed absolute Hz value, so its relative spectral
-    position is comparable across datasets with very different shaft speeds.
+    ``disturbance_types`` selects which of ``"harmonic"`` (a nearby machine), ``"gaussian"`` and
+    ``"impulsive"`` (clipped Lévy-stable) to generate. The noise-to-signal power ratio
+    ``10**(-target_snr_db/10)`` is split evenly across the requested types and applied band by
+    band, relative to the clean signal's power in that band (``ref``):
 
-    Seeded rewrite of the upstream generator: every random draw (the harmonic phase
-    offsets, the Gaussian noise, and the Lévy component) comes from ``rng``, so the
-    output is fully reproducible. This intentionally differs from the upstream
-    output, which seeded only the Lévy term (with a constant seed, so every file got
-    the *same* Lévy realization) and drew the rest from global state.
+    * gaussian / impulsive: white draws shaped by ``ref.fir`` (the square root of the smoothed
+      spectrum), then scaled to exactly their share of the total power, so their total SNR is the
+      target as well. The per-band level holds on average; bands right beside a strong line get
+      more noise than their own power warrants (see ``BAND_OCTAVES``).
+    * harmonic: a comb of ``HARMONIC_COUNT`` lines at ``k * HARMONIC_IAS_RATIO *
+      interferer_ias_hz(t)``. Each line's power is the target fraction of the signal power in the
+      band around its *current* frequency. Above ``k ~ 17`` neighbouring lines are less than a band
+      apart and split each band's budget, which holds on average over band positions (a band
+      centred on line ``k`` sits ``10*log10(k*(r-1/r))`` dB, at most ~2.7 dB, above the target).
+      Below ``k ~ 17`` the bands between lines stay empty, and there is no harmonic noise above the
+      comb's last line, so the harmonic component's total SNR is well above the target.
+
+    Args:
+        sig: Clean 1-D channel.
+        fs: Its sampling rate in Hz.
+        target_snr_db: Per-band SNR in dB.
+        rng: Source of every random draw (line phases, gaussian and Lévy samples).
+        interferer_ias_hz: Speed of the interfering machine in Hz, same shape as ``sig``; from
+            :func:`interferer_ias`, never the recording's own label.
+        ref: Reference spectrum of ``sig`` (:meth:`ReferenceSpectrum.from_signal`).
+        disturbance_types: Components to add.
+
+    Returns:
+        ``sig`` plus the disturbances, float64.
     """
-    p_signal_db = 10 * np.log10(np.mean(sig**2))
-    # SNR = P_signal_db - P_noise_db  =>  P_noise_db = P_signal_db - SNR
-    p_total_noise_desired = 10 ** ((p_signal_db - target_snr_db) / 10)  # Convert dB back to linear power
-    percentage = 1.0 / len(disturbance_types)
-
-    disturbances = []
+    # noise-to-signal power ratio in every band, for each requested component
+    ratio = 10 ** (-target_snr_db / 10) / len(disturbance_types)
+    r = 2 ** (BAND_OCTAVES / 2)
+    noise = np.zeros(sig.shape, dtype=np.float64)
     for kind in ("harmonic", "gaussian", "impulsive"):
         if kind not in disturbance_types:
             continue
         if kind == "harmonic":
-            # Base frequency wanders with a damped copy of this file's own IAS
-            # trajectory (rather than sitting still), so it can't be notch-filtered
-            # out; instantaneous frequency is integrated into a phase track.
-            ias_hz_f64 = np.asarray(ias_hz, dtype=np.float64)
-            mean_ias = np.mean(ias_hz_f64)
-            freq_t = HARMONIC_IAS_RATIO * mean_ias + HARMONIC_VARIATION_FACTOR * (ias_hz_f64 - mean_ias)
-            # float64 throughout: cumsum over long recordings (e.g. 200 kHz for 10s)
-            # accumulates too much rounding error in float32 to stay phase-accurate.
-            phase_t = np.cumsum(2 * np.pi * freq_t / fs)
-            harmonic = np.zeros_like(sig)
+            f_t = HARMONIC_IAS_RATIO * np.asarray(interferer_ias_hz, dtype=np.float64)
+            # float64 throughout: cumsum over long recordings (e.g. 200 kHz for 10s) accumulates
+            # too much rounding error in float32 to stay phase-accurate.
+            phase = np.cumsum(2 * np.pi * f_t / fs)
             for k in range(1, HARMONIC_COUNT + 1):
-                phi0 = rng.uniform(0, 2 * np.pi)
-                harmonic += np.sin(k * phase_t + phi0) / k
-            disturbances.append(harmonic)
-        elif kind == "gaussian":
-            disturbances.append(rng.normal(0, 1, size=sig.shape))
-        elif kind == "impulsive":
-            raw = stats.levy_stable.rvs(
-                alpha=IMPULSIVE_ALPHA, beta=IMPULSIVE_BETA, loc=0, scale=1, size=sig.shape, random_state=rng
-            )
-            disturbances.append(np.clip(raw, -IMPULSIVE_CLIP, IMPULSIVE_CLIP))
-
-    # lowpass filter each noise to be within fs/2 to avoid aliasing
-    disturbances = [
-        scipy.signal.filtfilt(*scipy.signal.butter(4, fs / 2.1, btype="low", fs=fs), disturbance)
-        for disturbance in disturbances
-    ]
-
-    # scale each noise to meet its (even) share of the total noise power
-    disturbances_scaled = [
-        disturbance * np.sqrt(p_total_noise_desired * percentage / np.mean(disturbance**2))
-        for disturbance in disturbances
-    ]
-
-    return sig + np.sum(np.stack(disturbances_scaled, axis=0), axis=0)
+                f_k = k * f_t
+                # lines of spacing f_t that share the band around f_k split that band's budget
+                n_lines = max(1.0, k * (r - 1 / r))
+                amp = np.sqrt(2 * ratio * ref.band_power(f_k / r, f_k * r) / n_lines)
+                amp[f_k >= 0.45 * fs] = 0  # a line that would alias is dropped, not folded
+                noise += amp * np.sin(k * phase + rng.uniform(0, 2 * np.pi))
+        else:
+            if kind == "gaussian":
+                white = rng.normal(0, 1, size=sig.shape)
+            else:
+                # drawn in chunks: scipy's levy_stable.rvs holds ~30 full-size temporaries, i.e.
+                # ~8 GB for the 35 M-sample planetary recordings
+                chunk = 1 << 21
+                white = np.concatenate(
+                    [
+                        np.clip(
+                            stats.levy_stable.rvs(
+                                alpha=IMPULSIVE_ALPHA,
+                                beta=IMPULSIVE_BETA,
+                                loc=0,
+                                scale=1,
+                                size=min(chunk, sig.size - i),
+                                random_state=rng,
+                            ),
+                            -IMPULSIVE_CLIP,
+                            IMPULSIVE_CLIP,
+                        )
+                        for i in range(0, sig.size, chunk)
+                    ]
+                ).reshape(sig.shape)
+            shaped = scipy.signal.oaconvolve(white, ref.fir, mode="same")
+            noise += shaped * np.sqrt(ratio * ref.var / np.mean(shaped**2))
+    return sig + noise
 
 
 def _disturbance_rng(base_seed: int, stem: str, level: float, variant: str) -> np.random.Generator:
@@ -318,56 +461,104 @@ def _disturbance_rng(base_seed: int, stem: str, level: float, variant: str) -> n
     return np.random.default_rng(base_seed ^ zlib.crc32(f"{stem}|{level}|{variant}".encode()))
 
 
+def _write_disturbed_copies(
+    dataset_path: Path, file: Path, other: Path, vib_keys: list[str], noise_levels: list[float], base_seed: int
+) -> None:
+    """All disturbed copies of one test file: one worker's share of :func:`write_disturbed_test_sets`.
+
+    ``other`` is the test file whose IAS drives the harmonic interferer. Module-level so that a
+    spawned worker process can import it.
+    """
+    with h5py.File(file, "r") as f:
+        own_ias, fs = f["IAS"][:], float(f.attrs["fs"])
+        clean = {k: f[k][:] for k in vib_keys}
+    with h5py.File(other, "r") as f:
+        other_ias, other_fs = f["IAS"][:], float(f.attrs["fs"])
+    refs = {k: ReferenceSpectrum.from_signal(clean[k], fs) for k in vib_keys}
+    for level in noise_levels:
+        for variant in DISTURBANCE_VARIANTS:
+            rng = _disturbance_rng(base_seed, file.stem, level, variant)
+            interferer = interferer_ias(own_ias, fs, other_ias, other_fs, rng)
+            dest_dir = dataset_path / f"test_disturbed_{level}dB_{variant}"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest_path = dest_dir / file.name
+            shutil.copy(str(file), str(dest_path))
+            with h5py.File(dest_path, "r+") as f:
+                for k in vib_keys:
+                    f[k][:] = add_disturbances(
+                        clean[k],
+                        fs,
+                        target_snr_db=level,
+                        rng=rng,
+                        interferer_ias_hz=interferer,
+                        ref=refs[k],
+                        disturbance_types=_VARIANT_DISTURBANCE_TYPES[variant],
+                    )
+
+
 def write_disturbed_test_sets(
     dataset_path: Path,
     vib_keys: list[str],
     noise_levels: list[float] = DISTURBANCE_LEVELS,
     base_seed: int = 0,
 ) -> None:
-    """Copy the basic test set into disturbed variant dirs with added noise.
+    """Copy the basic test set into disturbed variant dirs with added disturbances.
 
-    Reads ``dataset_path/test`` and writes, per noise level, one directory per
-    entry in ``DISTURBANCE_VARIANTS`` --
-    ``test_disturbed_<level>dB_combined/`` (all three noise components, power
-    split evenly) plus ``_harmonic/``, ``_gaussian/``, ``_impulsive/`` (each
-    isolating one component at the full target SNR) -- corrupting the
-    ``vib_keys`` channels in place. ``fs`` is read per file from its attrs (the
-    planetary gearbox has per-file rates; upstream reused one rate for the
-    whole dataset). Each file's IAS trace is read once from the pristine source
-    file and reused across every level/variant/vib_key for that file, since it
-    is level- and variant-invariant. Each (file, level, variant) triple gets its
-    own deterministic seed, so re-runs are byte-identical regardless of order,
-    and the variants for a given (file, level) do not share noise
-    realizations with each other.
+    Reads ``dataset_path/test`` and writes, per noise level, one directory per entry in
+    ``DISTURBANCE_VARIANTS`` -- ``test_disturbed_<level>dB_combined/`` (all three components, power
+    split evenly) plus ``_harmonic/``, ``_gaussian/``, ``_impulsive/`` (each isolating one
+    component at the full target SNR) -- corrupting the ``vib_keys`` channels in place; the IAS
+    label and the attrs are copied unchanged. ``fs`` is read per file from its attrs (the planetary
+    gearbox has per-file rates).
+
+    Each test file is one task, run by ``preparation_workers`` processes (``IDENTIBENCH_WORKERS``
+    overrides the count), longest files first: a task computes each channel's
+    :class:`ReferenceSpectrum` (and its shaping filter) once and writes all of the file's copies.
+    The harmonic interferer runs at the speed profile of another test file: the next one in sorted
+    order (cyclic) whose mean speed differs from this file's by at least
+    ``INTERFERER_MIN_SPEED_GAP``, else the one that differs most. It is therefore independent of
+    the file's own label and not at its speed either. Each (file, level, variant) triple gets its
+    own deterministic seed, so re-runs are byte-identical regardless of order and of the number of
+    workers, and the variants for a given (file, level) do not share noise realizations with each
+    other.
+
+    Args:
+        dataset_path: Prepared dataset directory containing ``test/``.
+        vib_keys: Vibration channels to disturb.
+        noise_levels: Per-band SNR levels in dB.
+        base_seed: XORed into every per-(file, level, variant) seed.
     """
     test_files = hdf_files_from_path(dataset_path / "test")
-    ias_by_stem = {}
+    mean_speed = {}
     for file in test_files:
         with h5py.File(file, "r") as f:
-            ias_by_stem[file.stem] = f["IAS"][:]
+            mean_speed[file.stem] = float(np.mean(f["IAS"][:]))
+    jobs = []
+    for i, file in enumerate(test_files):
+        # the next file (cyclic) at a clearly different mean speed, else the most different one;
+        # the last candidate is the file itself, used only when it is the only test file
+        own = mean_speed[file.stem]
+        candidates = [test_files[(i + j) % len(test_files)] for j in range(1, len(test_files) + 1)]
+        other = next(
+            (c for c in candidates[:-1] if abs(mean_speed[c.stem] - own) >= INTERFERER_MIN_SPEED_GAP * abs(own)),
+            max(candidates, key=lambda c: abs(mean_speed[c.stem] - own)),
+        )
+        jobs.append((dataset_path, file, other, vib_keys, noise_levels, base_seed))
+    jobs.sort(key=lambda job: job[1].stat().st_size, reverse=True)  # longest first balances the workers
 
-    total_operations = len(noise_levels) * len(DISTURBANCE_VARIANTS) * len(test_files)
-    with tqdm(total=total_operations, desc="Creating disturbed test sets", unit="file") as pbar:
-        for level in noise_levels:
-            for variant in DISTURBANCE_VARIANTS:
-                dest_dir = dataset_path / f"test_disturbed_{level}dB_{variant}"
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                for file in test_files:
-                    dest_path = dest_dir / file.name
-                    shutil.copy(str(file), str(dest_path))
-                    rng = _disturbance_rng(base_seed, file.stem, level, variant)
-                    with h5py.File(dest_path, "r+") as f:
-                        fs = float(f.attrs["fs"])
-                        for vib_key in vib_keys:
-                            f[vib_key][:] = add_disturbances(
-                                f[vib_key][:],
-                                fs,
-                                target_snr_db=level,
-                                rng=rng,
-                                ias_hz=ias_by_stem[file.stem],
-                                disturbance_types=_VARIANT_DISTURBANCE_TYPES[variant],
-                            )
-                    pbar.update(1)
+    per_file = len(noise_levels) * len(DISTURBANCE_VARIANTS)
+    n_workers = preparation_workers(len(jobs))
+    with tqdm(total=per_file * len(jobs), desc="Creating disturbed test sets", unit="file") as pbar:
+        if n_workers == 1:
+            for job in jobs:
+                _write_disturbed_copies(*job)
+                pbar.update(per_file)
+        else:
+            # "spawn": workers start clean instead of inheriting the caller's threads and open handles
+            with ProcessPoolExecutor(n_workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+                for future in as_completed([pool.submit(_write_disturbed_copies, *job) for job in jobs]):
+                    future.result()
+                    pbar.update(per_file)
 
 
 def ias_test_sets(dataset: Dataset, wear: bool = True) -> dict[str, list[tuple[Dataset, str]]]:

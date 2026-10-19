@@ -696,7 +696,10 @@ def dl_planetary_gearbox(
 # sets rebuilt (clipped Levy impulsive component).
 # version 7: removed bernoulli noise from disturbed test sets.
 # version 8: fix padtype of order domain lowpass
-planetary_gearbox_dataset = Dataset("planetary_gearbox", prepare=dl_planetary_gearbox, version="9")
+# version 10: disturbed test sets rebuilt: the harmonic interferer runs at another test file's
+# speed profile (was tied to this file's own IAS), and the SNR is defined per 1/12-octave band, with the noise
+# shaped like the signal's spectrum (was white noise against the total power).
+planetary_gearbox_dataset = Dataset("planetary_gearbox", prepare=dl_planetary_gearbox, version="10")
 
 _planetary_gearbox = dict(
     u_cols=["Acc_Carrier", "Acc_Sun"],

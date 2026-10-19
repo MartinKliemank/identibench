@@ -11,6 +11,7 @@ __all__ = [
     "dataset_to_hdf5",
     "download_file",
     "extract_archive",
+    "preparation_workers",
 ]
 
 import os
@@ -18,6 +19,7 @@ import tarfile
 import warnings
 import zipfile
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -283,19 +285,54 @@ def download_file(
     return dest
 
 
+def preparation_workers(
+    n_tasks: int,  # Independent tasks to spread (files to process, archive members to extract).
+) -> int:
+    """Number of parallel workers for dataset preparation, between 1 and ``n_tasks``.
+
+    ``IDENTIBENCH_WORKERS`` if set, else the CPUs this process may run on (on a cluster its
+    allocation, not the whole node), capped at 8: a disturbed-test-set worker holds about 120 bytes
+    per sample of its largest channel, ~4.3 GB for a planetary gearbox recording.
+    """
+    env = os.environ.get("IDENTIBENCH_WORKERS")
+    if env:
+        n = int(env)
+    else:
+        try:
+            n = min(len(os.sched_getaffinity(0)), 8)
+        except AttributeError:  # not available on macOS / Windows
+            n = min(os.cpu_count() or 1, 8)
+    return max(1, min(n, n_tasks))
+
+
 def extract_archive(
     path: Path,  # Archive file to extract (``.zip``, ``.tar``, ``.tar.gz``/``.tgz``).
     dest: Path,  # Destination directory; created if it does not exist.
     members: list[str] | None = None,  # Optional subset of archive members to extract.
 ) -> Path:
-    """Extract zip, tar, or tar.gz archive to dest directory."""
+    """Extract zip, tar, or tar.gz archive to dest directory.
+
+    Zip members are extracted by ``preparation_workers`` threads, each through its own handle: zlib
+    releases the GIL while inflating, so this scales with the number of members (8 threads: ~4.6x on
+    an archive of 30 similar members). One large member still runs on a single thread.
+    """
     path, dest = Path(path), Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
     if path.suffix == ".zip":
         with zipfile.ZipFile(path) as zf:
             targets = members or zf.namelist()
-            for m in targets:
-                zf.extract(m, dest)
+        n_threads = preparation_workers(len(targets))
+
+        def extract(names: list[str]) -> None:
+            with zipfile.ZipFile(path) as zf:
+                for m in names:
+                    try:
+                        zf.extract(m, dest)
+                    except FileExistsError:  # another thread created the same parent directory first
+                        zf.extract(m, dest)
+
+        with ThreadPoolExecutor(n_threads) as pool:
+            list(pool.map(extract, [targets[i::n_threads] for i in range(n_threads)]))
     elif path.name.endswith(".tar.gz") or path.name.endswith(".tgz") or path.suffix == ".tar":
         mode = "r:gz" if (path.name.endswith(".tar.gz") or path.name.endswith(".tgz")) else "r"
         with tarfile.open(path, mode) as tf:

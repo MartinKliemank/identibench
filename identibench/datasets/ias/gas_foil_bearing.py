@@ -41,8 +41,8 @@ _FILENAME_PATTERN = re.compile(r"^(Load\d+)_(\d+(?:_\d+)*)_([A-Za-z][A-Za-z0-9]*
 
 
 # Highest frequency the label retains. Unlike the other three this is not an order cutoff: the
-# IAS comes from an analog RPM channel that is low-pass filtered at 40 Hz in the time domain by
-# the upstream converter.
+# IAS comes from an analog RPM channel that the upstream TDMS conversion low-pass filters in the
+# time domain (zero-phase 4th-order Butterworth, -3 dB at 40 Hz).
 _IAS_BANDWIDTH_HZ = 40.0
 
 
@@ -69,6 +69,9 @@ def dl_gas_foil_bearing(
 
     The archive is already HDF5 (TDMS conversion happened upstream), so no
     signal preprocessing is needed. There is no wear condition for this dataset.
+    Upstream, every recording was trimmed to its rotating span plus at most 1.5 s of
+    standstill at either end; ``attrs["t_start"]`` is the time of its first kept sample
+    in the original recording, in s.
     """
     train_test_split = _require_sklearn()
     save_path = Path(save_path)
@@ -152,6 +155,8 @@ BenchmarkGasFoilBearing_GridwiseEstimation = BenchmarkSpec(
     # window_sec=3.0: the largest single window across every upstream method's search space
     # over all four IAS datasets (unlike the per-dataset WindowedEstimation windows above,
     # this one is kept uniform — it's only a context guarantee, not a tuned averaging window).
+    # The first/last window_sec / 2 = 1.5 s of a file are never scored; the upstream files keep 1.5 s of
+    # standstill at each end for exactly this, so raising window_sec would drop run-up/run-down samples.
     # step_sec: Nyquist for the label's retained band, _IAS_BANDWIDTH_HZ = 40.0 Hz -> <12.5 ms,
     # taken at 3 ms to match the other fast datasets (~4x margin).
     task=GridwiseEstimation(window_sec=3.0, step_sec=0.003),

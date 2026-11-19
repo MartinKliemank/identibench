@@ -18,6 +18,7 @@ from ...benchmark import BenchmarkSpec, Simulation, WindowedEstimation, Gridwise
 from ...dataset import Dataset
 from ...metrics import mae
 from ._common import (
+    MIN_SCORED_IAS_HZ,
     DatasetInfo,
     download_and_unpack,
     encoder_pulse_to_ias,
@@ -146,7 +147,7 @@ BenchmarkBallBearing_GridwiseEstimation = BenchmarkSpec(
     # this one is kept uniform — it's only a context guarantee, not a tuned averaging window).
     # step_sec: Nyquist for the label's retained band, _IAS_BANDWIDTH_HZ = 129.9 Hz
     # -> 3.85 ms, rounded down to 3 ms (1.28x margin).
-    task=GridwiseEstimation(window_sec=3.0, step_sec=0.003),
+    task=GridwiseEstimation(window_sec=3.0, step_sec=0.003, min_targ=MIN_SCORED_IAS_HZ),
     **_ball_bearing,
 )
 

@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 
 from .dataset import Dataset
+from .metrics import rel_acceptable_perc
 from .utils import Sequence, _load_sequences_from_files
 
 # {test_set_name: {metric_name: value}} — the scalar result of one task evaluation.
@@ -329,8 +330,14 @@ class GridwiseEstimation:
     window — it only bounds how far a query point can sit from the file edges;
     what the model does with its input context (average it, run a sliding
     window, look at a single point, ...) is entirely up to the model. The
-    per-query absolute errors are pooled (micro) across all files in a test set,
-    same statistics as :class:`WindowedEstimation` (``mae``/``medae``/``std``/``max``).
+    per-query errors are pooled (micro) across all files in a test set. The
+    headline is ``rel_acceptable_perc`` on the spec's first named test set: the
+    percentage of query points whose relative error |pred - true| / |true| is
+    below ``rel_tol`` (for IAS: below ``rel_tol`` shaft orders), scoring only
+    points with |true| > ``min_targ`` and counting non-finite predictions as
+    misses. Higher is better. The absolute-error statistics of
+    :class:`WindowedEstimation` (``mae``/``medae``/``std``/``max``) are reported
+    alongside.
 
     Model contract: ``model(u_full, y_init, attrs) -> np.ndarray`` — the same
     ``(u, y_init, attrs)`` signature as every other task, called once per file
@@ -349,12 +356,20 @@ class GridwiseEstimation:
         float  # Context guarantee around each query point, in seconds (NOT an averaging window — see class docstring).
     )
     step_sec: float  # Spacing between successive query points, in seconds.
+    rel_tol: float = 0.01  # Relative error below which a query point counts as acceptable (headline).
+    # Targets at or below this (y units) are not scored by the headline, as the relative error blows up near
+    # zero; the IAS specs pass ias._common.MIN_SCORED_IAS_HZ.
+    min_targ: float = 0.0
 
     def __post_init__(self):
         if self.window_sec <= 0:
             raise ValueError("window_sec must be > 0")
         if self.step_sec <= 0:
             raise ValueError("step_sec must be > 0")
+        if not self.rel_tol > 0:  # written as "not >" so NaN is rejected too
+            raise ValueError("rel_tol must be > 0")
+        if not self.min_targ >= 0:
+            raise ValueError("min_targ must be >= 0")
 
     def _preds_and_targets(self, model, seq):
         fs = float(seq.attrs["fs"])
@@ -397,12 +412,15 @@ class GridwiseEstimation:
             trues = np.concatenate(trues_chunks) if trues_chunks else np.empty(0)
             if preds.size == 0:
                 raise ValueError(f"{spec.name}: test set {set_name!r} produced no error samples")
+            acceptable_perc = rel_acceptable_perc(preds, trues, self.rel_tol, self.min_targ)
+            if np.isnan(acceptable_perc):
+                raise ValueError(f"{spec.name}: test set {set_name!r} has no target above min_targ={self.min_targ}")
             preds_by_set[set_name] = preds
             labels_by_set[set_name] = trues
-            scores[set_name] = _pooled_stats(np.abs(preds - trues))
+            scores[set_name] = {**_pooled_stats(np.abs(preds - trues)), "rel_acceptable_perc": acceptable_perc}
         return EvalResult(
             scores=scores,
-            headline=(next(iter(spec.test_sets)), "mae"),
+            headline=(next(iter(spec.test_sets)), "rel_acceptable_perc"),
             diagnostics={"predictions": preds_by_set, "labels": labels_by_set},
         )
 

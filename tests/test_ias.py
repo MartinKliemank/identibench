@@ -891,7 +891,7 @@ def test_run_gridwise_benchmark_on_synthetic_ias_dataset(tmp_path, monkeypatch):
     # 4000-sample files at fs=1000 -> a 0.05 s window / 0.01 s step gives 396 query points/file.
     spec = dataclasses.replace(
         BenchmarkBallBearing_Estimation,
-        task=GridwiseEstimation(window_sec=0.05, step_sec=0.01),
+        task=GridwiseEstimation(window_sec=0.05, step_sec=0.01, min_targ=1.0),
         test_sets=_narrowed_test_sets(),
     )
 
@@ -906,14 +906,34 @@ def test_run_gridwise_benchmark_on_synthetic_ias_dataset(tmp_path, monkeypatch):
 
     result = idb.run_benchmark(spec, build_model, seed=0)
 
-    # Headline = basic pooled MAE; the zero-model's per-query error is the constant IAS.
-    assert result["metric_name"] == "mae"
-    assert result["metric_score"] == pytest.approx(5.0, abs=1e-5)
+    # Headline = basic acceptable-point percentage: 5.02 vs 5 Hz is 0.004 orders off (< 0.01),
+    # vs the 9 Hz wear set 0.44 orders off.
+    assert result["metric_name"] == "rel_acceptable_perc"
+    assert result["metric_score"] == pytest.approx(100.0)
     assert set(result["test_sets"]) == {"basic", "wear", "disturbed_15dB_combined"}
-    assert result["test_sets"]["wear"]["mae"] == pytest.approx(9.0, abs=1e-5)
+    assert result["test_sets"]["wear"]["rel_acceptable_perc"] == pytest.approx(0.0)
+    assert result["test_sets"]["wear"]["mae"] == pytest.approx(3.98, abs=1e-5)
     basic = result["test_sets"]["basic"]
-    assert set(basic) == {"mae", "medae", "std", "max"}
+    assert set(basic) == {"mae", "medae", "std", "max", "rel_acceptable_perc"}
+    assert basic["mae"] == pytest.approx(0.02, abs=1e-5)
     assert basic["std"] == pytest.approx(0.0, abs=1e-5)  # constant IAS -> identical errors
+
+
+def test_gridwise_estimation_rejects_sets_without_scored_targets(tmp_path, monkeypatch):
+    monkeypatch.setenv("IDENTIBENCH_DATA_ROOT", str(tmp_path))
+    _build_synthetic_ias_dataset(tmp_path / "ball_bearing")
+    # A 6 Hz floor leaves nothing of the 5 Hz basic set to score: fail loudly, not NaN.
+    spec = dataclasses.replace(
+        BenchmarkBallBearing_Estimation,
+        task=GridwiseEstimation(window_sec=0.05, step_sec=0.01, min_targ=6.0),
+        test_sets=_narrowed_test_sets(),
+    )
+
+    def build_model(context):
+        return lambda u, y_init, attrs: np.full(len(attrs["t_query"]), 5.0)
+
+    with pytest.raises(ValueError, match="no target above min_targ"):
+        idb.run_benchmark(spec, build_model, seed=0)
 
 
 def test_gridwise_estimation_rejects_wrong_shaped_predictions(tmp_path, monkeypatch):
@@ -1018,6 +1038,7 @@ def test_registration():
         assert isinstance(spec.task, GridwiseEstimation)
         assert spec.task.window_sec == 3.0  # uniform context guarantee, unrelated to resolution
         assert spec.task.step_sec == expected_step
+        assert spec.task.min_targ == 1.0  # 60 rpm: only standstill drops out of the headline
         assert next(iter(spec.test_sets)) == "basic"  # built-in tasks headline the first set
         assert spec.y_cols == ["IAS"]
 

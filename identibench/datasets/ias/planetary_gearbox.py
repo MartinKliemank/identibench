@@ -48,6 +48,7 @@ from ...benchmark import BenchmarkSpec, Simulation, WindowedEstimation, Gridwise
 from ...dataset import Dataset
 from ...metrics import mae
 from ._common import (
+    MIN_SCORED_IAS_HZ,
     DatasetInfo,
     download_and_unpack,
     order_domain_lowpass,
@@ -740,7 +741,7 @@ BenchmarkPlanetaryGearbox_GridwiseEstimation = BenchmarkSpec(
     # overlap), so the grid never limits what a method can demonstrate. What it does cost is
     # aliasing-free spectral analysis of the stored diagnostics -- hence step_sec is recorded
     # alongside the results so that limitation is visible rather than silent.
-    task=GridwiseEstimation(window_sec=3.0, step_sec=0.003),
+    task=GridwiseEstimation(window_sec=3.0, step_sec=0.003, min_targ=MIN_SCORED_IAS_HZ),
     **_planetary_gearbox,
 )
 

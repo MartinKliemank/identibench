@@ -19,6 +19,7 @@ from ...benchmark import BenchmarkSpec, Simulation, WindowedEstimation, Gridwise
 from ...dataset import Dataset
 from ...metrics import mae
 from ._common import (
+    MIN_SCORED_IAS_HZ,
     DatasetInfo,
     _require_sklearn,
     download_and_unpack,
@@ -159,7 +160,7 @@ BenchmarkGasFoilBearing_GridwiseEstimation = BenchmarkSpec(
     # standstill at each end for exactly this, so raising window_sec would drop run-up/run-down samples.
     # step_sec: Nyquist for the label's retained band, _IAS_BANDWIDTH_HZ = 40.0 Hz -> <12.5 ms,
     # taken at 3 ms to match the other fast datasets (~4x margin).
-    task=GridwiseEstimation(window_sec=3.0, step_sec=0.003),
+    task=GridwiseEstimation(window_sec=3.0, step_sec=0.003, min_targ=MIN_SCORED_IAS_HZ),
     **_gas_foil_bearing,
 )
 

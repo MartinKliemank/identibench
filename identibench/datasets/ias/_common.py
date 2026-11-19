@@ -6,7 +6,6 @@ import tempfile
 import zlib
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from functools import cached_property
 from pathlib import Path
 
 import h5py

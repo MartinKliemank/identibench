@@ -5,6 +5,8 @@ __all__ = [
     "nrmse",
     "fit_index",
     "mae",
+    "relative_error",
+    "rel_acceptable_perc",
     "r_squared",
     "inclination_rmse_deg",
     "orientation_rmse_deg",
@@ -118,6 +120,49 @@ def mae(
     # Calculate MAE
     mae_val = np.mean(np.abs(inp - targ), axis=time_axis)
     return mae_val
+
+
+def relative_error(
+    inp: np.ndarray,  # Predicted / estimated values.
+    targ: np.ndarray,  # Ground truth target values.
+    min_targ: float = 0.0,  # Points with |targ| <= min_targ are not scored.
+) -> np.ndarray:  # Per-point relative error, NaN where not scored.
+    """
+    Computes the per-point relative error |inp - targ| / |targ|.
+
+    Points with |targ| <= min_targ are returned as NaN: near zero the relative error
+    explodes and says nothing about the estimate. For a speed in Hz the relative error
+    is the error in shaft orders (Hz of error per Hz of speed).
+    """
+    inp = np.asarray(inp, dtype=np.float64)
+    targ = np.asarray(targ, dtype=np.float64)
+    if inp.shape != targ.shape:
+        raise ValueError(f"Input shapes must match. Got {inp.shape} and {targ.shape}")
+    scored = np.abs(targ) > min_targ
+    rel_err = np.full(targ.shape, np.nan)
+    rel_err[scored] = np.abs(inp[scored] - targ[scored]) / np.abs(targ[scored])
+    return rel_err
+
+
+def rel_acceptable_perc(
+    inp: np.ndarray,  # Predicted / estimated values.
+    targ: np.ndarray,  # Ground truth target values.
+    rel_tol: float = 0.01,  # A point is acceptable if its relative error is below this.
+    min_targ: float = 0.0,  # Points with |targ| <= min_targ are not scored.
+) -> float:  # Percentage of scored points with acceptable relative error, pooled over all elements.
+    """
+    Computes the percentage of scored points whose relative error is below ``rel_tol``.
+
+    The scored points are those with |targ| > min_targ; which points they are depends on
+    ``targ`` only, so a non-finite prediction counts as a miss instead of dropping out of
+    the denominator. Returns NaN if no point is scored. Higher is better.
+    """
+    rel_err = relative_error(inp, targ, min_targ)
+    n_scored = np.count_nonzero(np.abs(np.asarray(targ, dtype=np.float64)) > min_targ)
+    if n_scored == 0:
+        return float("nan")
+    # NaN (unscored or non-finite prediction) compares False, so it is never a hit
+    return float(100.0 * np.count_nonzero(rel_err < rel_tol) / n_scored)
 
 
 def r_squared(

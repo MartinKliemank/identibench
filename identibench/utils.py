@@ -291,8 +291,8 @@ def preparation_workers(
     """Number of parallel workers for dataset preparation, between 1 and ``n_tasks``.
 
     ``IDENTIBENCH_WORKERS`` if set, else the CPUs this process may run on (on a cluster its
-    allocation, not the whole node), capped at 8: a disturbed-test-set worker holds about 120 bytes
-    per sample of its largest channel, ~4.3 GB for a planetary gearbox recording.
+    allocation, not the whole node), capped at 8: a disturbed-test-set worker holds about 140 bytes
+    per sample of its recording, ~5 GB for a planetary gearbox recording.
     """
     env = os.environ.get("IDENTIBENCH_WORKERS")
     if env:

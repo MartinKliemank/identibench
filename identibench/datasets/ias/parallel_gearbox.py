@@ -18,6 +18,7 @@ from ...benchmark import BenchmarkSpec, Simulation, WindowedEstimation, Gridwise
 from ...dataset import Dataset
 from ...metrics import mae
 from ._common import (
+    MIN_SCORED_IAS_HZ,
     DatasetInfo,
     _require_sklearn,
     download_and_unpack,
@@ -260,7 +261,7 @@ BenchmarkParallelGearbox_GridwiseEstimation = BenchmarkSpec(
     # step_sec: Nyquist for the label's retained band, _IAS_BANDWIDTH_HZ = 4.03 Hz -> 124 ms,
     # rounded down to 80 ms (1.55x margin). A 1 PPR tacho simply carries very little bandwidth, so
     # this is by far the coarsest of the four grids. Must be updated whenever _CUTOFF_ORDER changes.
-    task=GridwiseEstimation(window_sec=3.0, step_sec=0.1),
+    task=GridwiseEstimation(window_sec=3.0, step_sec=0.1, min_targ=MIN_SCORED_IAS_HZ),
     **_parallel_gearbox,
 )
 

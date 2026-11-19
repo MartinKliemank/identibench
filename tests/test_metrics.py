@@ -7,6 +7,8 @@ from identibench.metrics import (
     nrmse,
     fit_index,
     mae,
+    relative_error,
+    rel_acceptable_perc,
     r_squared,
     inclination_rmse_deg,
     orientation_rmse_deg,
@@ -145,6 +147,38 @@ class TestMAE:
         np.testing.assert_allclose(
             mae(data_2d["y_mixed_err"], data_2d["y_true"], time_axis=0), np.array([0.1, 1.0 / 3.0]), atol=1e-10
         )
+
+
+# --- Relative error / acceptable percentage Tests ---
+
+
+class TestRelativeError:
+    def test_values_and_mask(self):
+        targ = np.array([0.0, 5.0, 10.0, -20.0])
+        inp = np.array([1.0, 5.5, 9.0, -19.0])
+        rel_err = relative_error(inp, targ, min_targ=5.0)
+        # |targ| <= 5 is not scored; sign of targ does not matter
+        np.testing.assert_allclose(rel_err, [np.nan, np.nan, 0.1, 0.05])
+
+    def test_shape_mismatch_raises(self):
+        with pytest.raises(ValueError):
+            relative_error(np.zeros(3), np.zeros(4))
+
+
+class TestRelAcceptablePerc:
+    def test_share_of_scored_points(self):
+        targ = np.array([1.0, 100.0, 100.0, 100.0, 100.0])
+        inp = np.array([9.0, 100.5, 101.0, 99.0, 102.0])  # rel errors 8 (unscored), 0.005, 0.01, 0.01, 0.02
+        # 0.01 itself is not below the 0.01 tolerance: 1 hit of 4 scored points
+        assert rel_acceptable_perc(inp, targ, rel_tol=0.01, min_targ=2.0) == pytest.approx(25.0)
+
+    def test_non_finite_prediction_counts_as_miss(self):
+        targ = np.full(4, 10.0)
+        inp = np.array([10.0, np.nan, np.inf, 10.0])
+        assert rel_acceptable_perc(inp, targ) == pytest.approx(50.0)
+
+    def test_nothing_scored_is_nan(self):
+        assert np.isnan(rel_acceptable_perc(np.ones(3), np.ones(3), min_targ=6.0))
 
 
 # --- R-squared Tests ---

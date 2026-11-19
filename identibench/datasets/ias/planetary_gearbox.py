@@ -56,6 +56,12 @@ from ._common import (
     ias_test_sets,
     write_disturbed_test_sets,
 )
+from .harmonics import HarmonicSettings
+
+# Angle-domain analysis of the disturbed test sets (`harmonics`): 16-revolution frames (1/16-order
+# resolution) separate the mesh harmonics' +-0.173 carrier sidebands; the 12 kHz cutoff keeps the angle
+# grid of the 925 s recordings at 4096-16384 samples per revolution (depending on their slowest speed).
+HARMONIC_SETTINGS = HarmonicSettings(segment_revs=16, cutoff_hz=12000.0)
 
 _INFO = DatasetInfo(
     name="Planetary_Gearbox",
@@ -678,10 +684,10 @@ def dl_planetary_gearbox(
                     1,
                     _RING_TEETH * _SUN_TEETH / (_SUN_TEETH + _RING_TEETH),
                 ],
-                ias_bandwidth_hz=_IAS_BANDWIDTH_HZ,
+                ias_bandwidth_orders=_CUTOFF_ORDER,
             )
 
-    write_disturbed_test_sets(save_path, vib_keys=["Acc_Carrier", "Acc_Sun"])
+    write_disturbed_test_sets(save_path, vib_keys=["Acc_Carrier", "Acc_Sun"], settings=HARMONIC_SETTINGS)
 
 
 # version 2: IAS reconstructed from the sun-shaft zebra tape (was the 1PR carrier pickup with a
@@ -699,7 +705,9 @@ def dl_planetary_gearbox(
 # version 10: disturbed test sets rebuilt: the harmonic interferer runs at another test file's
 # speed profile (was tied to this file's own IAS), and the SNR is defined per 1/12-octave band, with the noise
 # shaped like the signal's spectrum (was white noise against the total power).
-planetary_gearbox_dataset = Dataset("planetary_gearbox", prepare=dl_planetary_gearbox, version="10")
+# version 11: disturbed test sets referenced to the speed-locked harmonics (`harmonics`): every line
+# sits S dB above the noise in its one-order band (was: the clean spectrum per 1/12 octave).
+planetary_gearbox_dataset = Dataset("planetary_gearbox", prepare=dl_planetary_gearbox, version="11")
 
 _planetary_gearbox = dict(
     u_cols=["Acc_Carrier", "Acc_Sun"],

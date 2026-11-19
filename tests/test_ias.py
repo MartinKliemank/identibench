@@ -9,7 +9,8 @@ import numpy as np
 import pytest
 
 import identibench as idb
-from identibench.datasets.ias import GridwiseEstimation, WindowedEstimation, _common
+from identibench.datasets.ias import GridwiseEstimation, WindowedEstimation, _common, harmonics
+from identibench.datasets.ias.harmonics import HarmonicSettings
 from identibench.datasets.ias import planetary_gearbox as planetary
 from identibench.datasets.ias.ball_bearing import (
     BenchmarkBallBearing_Estimation,
@@ -339,91 +340,228 @@ def test_planetary_labels_hold_up_on_the_real_recordings():
         assert np.sqrt(np.mean(r**2)) <= 1.05 * residual, stem
 
 
+# ───────────────────────── speed-locked harmonics ─────────────────────────
+
+# 16-revolution frames: fine enough bins that measuring a one-order band takes little from its neighbours
+_SETTINGS = HarmonicSettings(segment_revs=16)
+
+
+def _machine(speed_hz, fs, orders=(1.0, 2.0, 3.0), amplitudes=(1.0, 0.5, 0.3), noise=0.05, seed=0):
+    """Vibration of a machine turning at `speed_hz` (one value per sample): sines locked to the shaft
+    angle at `orders`, plus white noise."""
+    rng = np.random.default_rng(seed)
+    angle = np.cumsum(speed_hz) / fs
+    locked = sum(a * np.sin(2 * np.pi * o * angle + rng.uniform(0, 2 * np.pi)) for o, a in zip(orders, amplitudes))
+    return locked + noise * rng.standard_normal(len(speed_hz))
+
+
+def _reference(sig, speed, fs, orders=(1.0, 2.0, 3.0)):
+    grid = harmonics.AngleGrid.from_ias(speed, fs, _SETTINGS)
+    return harmonics.HarmonicReference.from_signal(sig, grid, np.asarray(orders))
+
+
+def test_find_lines_keeps_locked_lines_and_drops_fixed_tones():
+    """Under a speed sweep a fixed-Hz tone drifts through the orders and loses its phase relation."""
+    fs = 2000.0
+    t = np.arange(int(fs * 20)) / fs
+    speed = 15 + 15 * t / t[-1]
+    sig = _machine(speed, fs, orders=(1.0, 2.5), amplitudes=(1.0, 0.5)) + 0.5 * np.sin(2 * np.pi * 150 * t)
+
+    lines = harmonics.find_lines(harmonics.angle_spectra(sig, harmonics.AngleGrid.from_ias(speed, fs, _SETTINGS)))
+
+    assert np.isclose(lines, 1.0, atol=0.25).any() and np.isclose(lines, 2.5, atol=0.25).any()
+    # the 150 Hz tone sweeps through orders 10..5; where the sweep starts and ends it lingers at one order
+    # for a few frames and does look locked there (that is what `dataset_lines`' consensus removes)
+    assert not ((lines > 5.25) & (lines < 9.75)).any()
+
+
+def test_find_lines_raises_no_false_alarms_on_noise():
+    fs = 2000.0
+    t = np.arange(int(fs * 20)) / fs
+    speed = 15 + 15 * t / t[-1]
+    noise = np.random.default_rng(0).standard_normal(len(t))
+    assert len(harmonics.find_lines(harmonics.angle_spectra(noise, harmonics.AngleGrid.from_ias(speed, fs, _SETTINGS)))) == 0
+
+
+def test_dataset_lines_drops_fixed_hz_content_by_consensus(tmp_path, monkeypatch):
+    """At constant speed a fixed tone looks locked, but at a different order in every recording."""
+    monkeypatch.setenv("IDENTIBENCH_WORKERS", "1")
+    fs, n = 2000.0, 20_000
+    t = np.arange(n) / fs
+    speeds = (12.0, 15.0, 19.0, 23.0, 27.0, 31.0)
+    for i, speed in enumerate(speeds):
+        sig = _machine(np.full(n, speed), fs, orders=(2.02,), amplitudes=(1.0,), seed=i) + np.sin(2 * np.pi * 120 * t)
+        _write_ias_file(tmp_path / "train" / f"rec_{i}.hdf5", np.full(n, speed), {"Acc_x": sig}, fs=fs)
+
+    lines = harmonics.dataset_lines(tmp_path, ["Acc_x"], _SETTINGS)
+
+    assert lines.n_recordings == len(speeds)
+    assert lines.strongest(1) == pytest.approx([2.0])  # the 2.02 line on the 1/16-order bin grid
+    assert lines.refined_orders[0] == pytest.approx(2.02, abs=0.005)
+    assert lines.orders[lines.highest_snr(1)] == pytest.approx([2.0])
+    assert lines.median_snr_db[0] > 10  # the unit sine stands far out of the 0.05 white noise
+    for speed in speeds:
+        assert not np.isclose(lines.orders, 120 / speed, atol=0.3).any(), speed
+    lines.save(tmp_path / "lines.json")
+    back = harmonics.LineList.load(tmp_path / "lines.json")
+    np.testing.assert_allclose(back.orders, lines.orders)
+    np.testing.assert_allclose(back.median_snr_db, lines.median_snr_db)
+    np.testing.assert_allclose(back.refined_orders, lines.refined_orders)
+    assert back.settings == lines.settings and back.splits == lines.splits
+
+
+@pytest.mark.parametrize("kind", ["gaussian", "impulsive"])
+def test_shaped_disturbances_put_every_line_at_the_target_snr(kind):
+    """At constant speed every line's one-order band holds exactly its own power over 10**(S/10)."""
+    fs = 2000.0
+    speed = np.full(int(fs * 60), 20.0)
+    sig = _machine(speed, fs)
+    ref = _reference(sig, speed, fs)
+
+    for target_snr_db in (15.0, -7.5):
+        noisy = _common.add_disturbances(sig, target_snr_db, np.random.default_rng(1), ref, speed, None, (kind,))
+        snr = ref.line_snr(noisy - sig).long_term_snr_db()
+        np.testing.assert_allclose(snr, target_snr_db, atol=1.0, err_msg=f"{kind} at {target_snr_db} dB")
+
+
+def test_strongest_line_stays_near_the_target_under_a_sweep():
+    """A stationary noise cannot follow sweeping lines exactly, but the strongest one stays close."""
+    fs = 2000.0
+    t = np.arange(int(fs * 60)) / fs
+    speed = 15 + 15 * t / t[-1]
+    sig = _machine(speed, fs)
+    ref = _reference(sig, speed, fs)
+    noisy = _common.add_disturbances(sig, 0.0, np.random.default_rng(1), ref, speed, None, ("gaussian",))
+    snr = ref.line_snr(noisy - sig)
+    assert snr.long_term_snr_db()[snr.strongest_line()] == pytest.approx(0.0, abs=2.0)
+
+
+def test_line_snr_reports_effective_snr_and_the_strongest_line_in_band():
+    fs = 2000.0
+    speed = np.full(int(fs * 30), 20.0)
+    orders = np.array([1.0, 2.0, 3.0])
+    sig = _machine(speed, fs, amplitudes=(0.3, 1.0, 0.5), noise=0.3)  # order 2 strongest
+    noisy = _common.add_disturbances(sig, 0.0, np.random.default_rng(1), _reference(sig, speed, fs), speed, None, ("gaussian",))
+
+    snr = harmonics.line_snr(sig, noisy, speed, fs, orders, _SETTINGS)
+
+    assert snr.orders[snr.strongest_line()] == 2.0
+    assert snr.orders[snr.strongest_line(max_freq_hz=45.0)] == 1.0  # (2 + 0.5) x 20 Hz is above 45 Hz
+    assert (snr.long_term_snr_db(effective=True) < snr.long_term_snr_db()).all()  # the clean background counts too
+    assert snr.snr_db().shape == (len(snr.frame_time), len(snr.orders))
+    assert (np.diff(snr.frame_time) > 0).all() and 0 < snr.frame_time[0] < snr.frame_time[-1] < len(sig) / fs
+
+
+def test_reference_needs_a_line_above_the_background():
+    fs = 2000.0
+    speed = np.full(int(fs * 20), 20.0)
+    noise = np.random.default_rng(0).standard_normal(len(speed))
+    with pytest.raises(ValueError, match="no line"):
+        _reference(noise, speed, fs)
+
+
+def test_frame_speed_is_exact_at_constant_speed():
+    """Every frame -- the last one too, whatever the grid's tail -- reports the recording's speed."""
+    for n in (20_000, 20_500, 21_000, 21_500):
+        grid = harmonics.AngleGrid.from_ias(np.full(n, 20.0), 2000.0, _SETTINGS)
+        np.testing.assert_allclose(grid.frame_speed, 20.0, rtol=1e-9, err_msg=f"{n} samples")
+
+
+def test_bins_only_a_silent_line_covers_are_interpolated(monkeypatch):
+    """A band covered only by a line at zero power is not occupied: the reference continues there at the
+    level of the highest line that has power, instead of taking the float sums' rounding residue (which
+    punched 80-140 dB holes into some real references)."""
+    fs = 2000.0
+    t = np.arange(int(fs * 30)) / fs
+    speed = 15 + 15 * t / t[-1]
+    original = harmonics._frame_band_power
+
+    def silence_the_top_line(x_angle, grid, bins_per_band, frames):
+        power = original(x_angle, grid, bins_per_band, frames)
+        if bins_per_band.shape == (3, 2 * harmonics.MAIN_LOBE_BINS + 1):  # the reference's line powers
+            power[:, -1] = 0.0
+        return power
+
+    monkeypatch.setattr(harmonics, "_frame_band_power", silence_the_top_line)
+    ref = _reference(_machine(speed, fs), speed, fs)
+
+    only_top_line = ref.freqs > 2.5 * speed.max()  # above every band of orders 1 and 2
+    assert not ref.occupied[only_top_line].any()
+    duration = (ref.grid.hop_len / ref.grid.samples_per_rev) / ref.grid.frame_speed[ref.frames]
+    line_2_density = np.nansum(duration * ref.line_power[:, 1] / ref.grid.frame_speed[ref.frames]) / duration.sum()
+    np.testing.assert_allclose(ref.density[only_top_line], line_2_density, rtol=1e-9)
+
+
+def test_flat_extension_follows_the_outermost_lines():
+    """Below the lowest and above the highest line the reference holds their time-weighted mean density."""
+    fs = 2000.0
+    speed = np.full(int(fs * 30), 20.0)
+    ref = _reference(_machine(speed, fs), speed, fs)
+    assert ref.density[1] == pytest.approx(np.nanmean(ref.line_power[:, 0]) / 20.0, rel=1e-9)
+    assert ref.density[-1] == pytest.approx(np.nanmean(ref.line_power[:, -1]) / 20.0, rel=1e-9)
+
+
 # ───────────────────────── seeded disturbances ─────────────────────────
 
 
-def _coloured_noise(n, fs, seed):
-    """Broadband test signal: white noise through a one-pole 200 Hz low-pass (-28 dB at 5 kHz)."""
-    white = np.random.default_rng(seed).standard_normal(n)
-    f = np.fft.rfftfreq(n, 1 / fs)
-    return np.fft.irfft(np.fft.rfft(white) / np.sqrt(1 + (f / 200.0) ** 2), n=n)
-
-
-def _disturb(sig, fs, target_snr_db, seed, disturbance_types=("harmonic", "gaussian", "impulsive"), interferer=None):
-    """`add_disturbances` against the reference spectrum of `sig`, with a 20 Hz interferer by default."""
+def _disturb(sig, speed, fs, target_snr_db, seed, disturbance_types=("harmonic", "gaussian", "impulsive"), interferer=None):
+    """`add_disturbances` against the harmonic reference of `sig`, with a 27 Hz interferer by default."""
     return _common.add_disturbances(
         sig,
-        fs,
-        target_snr_db=target_snr_db,
-        rng=np.random.default_rng(seed),
-        interferer_ias_hz=np.full_like(sig, 20.0) if interferer is None else interferer,
-        ref=_common.ReferenceSpectrum.from_signal(sig, fs),
+        target_snr_db,
+        np.random.default_rng(seed),
+        _reference(sig, speed, fs),
+        speed,
+        interferer_ias_hz=np.full_like(sig, 27.0) if interferer is None else interferer,
         disturbance_types=disturbance_types,
     )
 
 
 def test_add_disturbances_deterministic_and_seed_sensitive():
-    fs = 10_000.0
-    sig = _coloured_noise(int(fs), fs, seed=0)
+    fs = 2000.0
+    speed = np.full(int(fs * 10), 20.0)
+    sig = _machine(speed, fs)
 
-    out_a = _disturb(sig, fs, 15, seed=7)
-    np.testing.assert_array_equal(out_a, _disturb(sig, fs, 15, seed=7))
-    assert not np.array_equal(out_a, _disturb(sig, fs, 15, seed=8))
-
-
-def test_shaped_disturbances_hit_target_snr_in_every_band():
-    """Gaussian and impulsive noise follow the signal's spectrum: the SNR is the target in each band and in total."""
-    fs = 10_000.0
-    n = int(fs * 10)
-    sig = _coloured_noise(n, fs, seed=0)
-    r = 2 ** (1 / 6)  # measured in 1/3-octave bands, wider than the 1/12-octave reference bands
-    centres = 50 * 2 ** (np.arange(0, 40) / 3)
-    centres = centres[centres * r < 0.4 * fs]
-    sig_ref = _common.ReferenceSpectrum.from_signal(sig, fs, resolution_hz=fs * 20 / n)
-
-    for kind in ("gaussian", "impulsive"):
-        for target_snr_db in (15, -7.5):
-            noise = _disturb(sig, fs, target_snr_db, seed=1, disturbance_types=(kind,)) - sig
-            assert 10 * np.log10(np.var(sig) / np.mean(noise**2)) == pytest.approx(target_snr_db, abs=1e-6)
-            noise_ref = _common.ReferenceSpectrum.from_signal(noise, fs, resolution_hz=fs * 20 / n)
-            band_snr = 10 * np.log10(
-                sig_ref.band_power(centres / r, centres * r) / noise_ref.band_power(centres / r, centres * r)
-            )
-            np.testing.assert_allclose(band_snr, target_snr_db, atol=2.0, err_msg=f"{kind} at {target_snr_db} dB")
+    out_a = _disturb(sig, speed, fs, 15, seed=7)
+    np.testing.assert_array_equal(out_a, _disturb(sig, speed, fs, 15, seed=7))
+    assert not np.array_equal(out_a, _disturb(sig, speed, fs, 15, seed=8))
 
 
 def test_combined_splits_the_noise_power_evenly():
-    fs = 10_000.0
-    sig = _coloured_noise(int(fs * 4), fs, seed=0)
+    """Two shaped components at half the power each put the lines at the target together."""
+    fs = 2000.0
+    speed = np.full(int(fs * 60), 20.0)
+    sig = _machine(speed, fs)
+    ref = _reference(sig, speed, fs)
 
-    noise = _disturb(sig, fs, 0, seed=1, disturbance_types=("gaussian", "impulsive")) - sig
-    assert 10 * np.log10(np.var(sig) / np.mean(noise**2)) == pytest.approx(0, abs=0.2)
+    noisy = _common.add_disturbances(sig, 0.0, np.random.default_rng(1), ref, speed, None, ("gaussian", "impulsive"))
+    np.testing.assert_allclose(ref.line_snr(noisy - sig).long_term_snr_db(), 0.0, atol=1.0)
 
 
 def test_impulsive_disturbance_stays_bounded_across_sample_rates():
-    """No single Levy sample may dominate the noise energy, which the SNR normalisation would hide."""
+    """No single Levy sample may dominate the noise energy, which the power normalisation would hide."""
     for fs in (12_800.0, 51_200.0):
-        sig = _coloured_noise(int(fs * 60.0), fs, seed=0)
-        noise = _disturb(sig, fs, 0, seed=0, disturbance_types=("impulsive",)) - sig
+        speed = np.full(int(fs * 60.0), 50.0)
+        sig = _machine(speed, fs)
+        noise = _disturb(sig, speed, fs, 0, seed=0, disturbance_types=("impulsive",)) - sig
         energy = noise**2
         share = energy.max() / energy.sum()
         assert share < 0.03, f"impulsive at fs={fs}: largest sample holds {share:.2%} of the noise energy"
 
 
 def test_harmonic_disturbance_follows_the_interferer():
-    """The comb runs at the interferer's speed, which rises here while the signal stays stationary."""
-    fs = 5_000.0
-    n = int(fs) * 4
-    sig = _coloured_noise(n, fs, seed=0)
+    """The comb runs at the interferer's speed, which rises here while the machine runs at constant speed."""
+    fs = 2000.0
+    n = int(fs * 20)
+    speed = np.full(n, 20.0)
+    sig = _machine(speed, fs)
     t = np.arange(n) / fs
-    interferer = 20.0 + 10.0 * (t / t[-1])
+    interferer = 22.0 + 6.0 * (t / t[-1])
 
-    noise = _disturb(sig, fs, 0, seed=0, disturbance_types=("harmonic",), interferer=interferer) - sig
+    noise = _disturb(sig, speed, fs, 0, seed=0, disturbance_types=("harmonic",), interferer=interferer) - sig
 
     half = n // 2
     freqs = np.fft.rfftfreq(half, d=1 / fs)
-    # Line amplitudes follow the signal's band power, which grows with frequency on this spectrum, so
-    # the fundamental is found in a window that holds both halves' expected values, not as the global peak.
     window = (freqs > 15.0) & (freqs < 35.0)
     first_half_peak = freqs[window][np.argmax(np.abs(np.fft.rfft(noise[:half]))[window])]
     second_half_peak = freqs[window][np.argmax(np.abs(np.fft.rfft(noise[half:]))[window])]
@@ -431,23 +569,34 @@ def test_harmonic_disturbance_follows_the_interferer():
     assert second_half_peak == pytest.approx(_common.HARMONIC_IAS_RATIO * np.mean(interferer[half:]), rel=0.05)
 
 
-def test_harmonic_lines_sit_at_the_target_snr_in_their_band():
-    """Each line carries the target fraction of the signal power in the 1/12-octave band around it."""
-    fs, target_snr_db = 2_000.0, 0.0
-    n = int(fs * 200)
-    sig = _coloured_noise(n, fs, seed=0)
-    f_t = _common.HARMONIC_IAS_RATIO * 20.0
-    noise = _disturb(sig, fs, target_snr_db, seed=1, disturbance_types=("harmonic",)) - sig
+def test_harmonic_lines_sit_at_the_target_below_an_own_harmonic():
+    """Each comb line carries 10**(-S/10) x the power an own harmonic would have at its frequency."""
+    fs, target_snr_db = 2000.0, -3.0
+    n = int(fs * 60)
+    speed = np.full(n, 20.0)
+    sig = _machine(speed, fs)
+    ref = _reference(sig, speed, fs)
+    noise = _disturb(sig, speed, fs, target_snr_db, seed=1, disturbance_types=("harmonic",)) - sig
 
     t = np.arange(n) / fs
-    r = 2 ** (_common.BAND_OCTAVES / 2)
-    sig_ref = _common.ReferenceSpectrum.from_signal(sig, fs, resolution_hz=0.05)  # finer than the generator's
-    for k in (1, 2, 3, 32):  # isolated lines, and one that shares its band with neighbours
-        f_k = k * f_t
+    for k in (1, 2, 3):
+        f_k = k * _common.HARMONIC_IAS_RATIO * 27.0
         line_power = np.abs(2 * np.mean(noise * np.exp(-2j * np.pi * f_k * t))) ** 2 / 2
-        band_snr = 10 * np.log10(sig_ref.band_power(f_k / r, f_k * r) / line_power)
-        shared = 10 * np.log10(max(1.0, k * (r - 1 / r)))  # the band's budget is split over its lines
-        assert band_snr == pytest.approx(target_snr_db + shared, abs=1.0), f"line {k}"
+        own_line_power = np.interp(f_k, ref.freqs, ref.density) * 20.0  # reference density x one own order
+        assert 10 * np.log10(own_line_power / line_power) == pytest.approx(target_snr_db, abs=0.3), f"line {k}"
+
+
+def test_comb_vanishes_while_the_interferer_stands_still():
+    """A stopped interfering machine emits nothing, instead of piling all its lines up at 0 Hz."""
+    fs = 2000.0
+    n = int(fs * 20)
+    speed = np.full(n, 20.0)
+    sig = _machine(speed, fs)
+    interferer = np.where(np.arange(n) < n // 2, 0.0, 25.0)
+
+    comb = _disturb(sig, speed, fs, 0, seed=0, disturbance_types=("harmonic",), interferer=interferer) - sig
+
+    assert np.sqrt(np.mean(comb[: n // 2] ** 2)) < 1e-9 * np.sqrt(np.mean(comb[n // 2 :] ** 2))
 
 
 def test_interferer_does_not_follow_the_own_speed_profile():
@@ -465,19 +614,25 @@ def test_interferer_does_not_follow_the_own_speed_profile():
 def _write_ias_file(path, ias, vib_channels, fs=1000.0):
     # Write through the production writer so the fixtures track its layout.
     path.parent.mkdir(parents=True, exist_ok=True)
-    _common.save_signals_hdf5({"IAS": ias, **vib_channels}, path, fs=fs, gear_ratio=1, ias_bandwidth_hz=100.0)
+    _common.save_signals_hdf5({"IAS": ias, **vib_channels}, path, fs=fs, gear_ratio=1, ias_bandwidth_orders=20.0)
 
 
-def test_write_disturbed_test_sets_reproducible(tmp_path):
-    for run_dir in ("a", "b"):
-        ds = tmp_path / run_dir
-        for i in range(2):
-            # identical per-file content in both dirs (deterministic per-index seed)
-            ias = np.random.default_rng(i).standard_normal(500)
-            _write_ias_file(ds / "test" / f"rec_{i}.hdf5", ias, {"Acc_x": np.sin(np.arange(500))})
+def _write_machine_dataset(ds, speeds, fs=2000.0, seconds=10.0):
+    """One recording per (split, constant speed) with locked orders 1-3, as `_machine` builds them."""
+    n = int(fs * seconds)
+    for split, split_speeds in speeds.items():
+        for i, speed in enumerate(split_speeds):
+            ias = np.full(n, speed)
+            _write_ias_file(ds / split / f"rec_{i}.hdf5", ias, {"Acc_x": _machine(ias, fs, seed=i)}, fs=fs)
 
-    _common.write_disturbed_test_sets(tmp_path / "a", noise_levels=[15, 0], vib_keys=["Acc_x"])
-    _common.write_disturbed_test_sets(tmp_path / "b", noise_levels=[0, 15], vib_keys=["Acc_x"])  # reversed order
+
+def test_write_disturbed_test_sets_reproducible(tmp_path, monkeypatch):
+    """Byte-identical whatever the order of the levels and the number of worker processes."""
+    speeds = {"train": [18.0, 25.0], "test": [20.0, 30.0]}
+    for run_dir, workers, levels in (("a", "1", [15, 0]), ("b", "2", [0, 15])):
+        monkeypatch.setenv("IDENTIBENCH_WORKERS", workers)
+        _write_machine_dataset(tmp_path / run_dir, speeds)
+        _common.write_disturbed_test_sets(tmp_path / run_dir, vib_keys=["Acc_x"], settings=_SETTINGS, noise_levels=levels)
 
     for level in (15, 0):
         for variant in _common.DISTURBANCE_VARIANTS:
@@ -486,30 +641,29 @@ def test_write_disturbed_test_sets_reproducible(tmp_path):
                     h5py.File(tmp_path / "a" / f"test_disturbed_{level}dB_{variant}" / f"rec_{i}.hdf5") as fa,
                     h5py.File(tmp_path / "b" / f"test_disturbed_{level}dB_{variant}" / f"rec_{i}.hdf5") as fb,
                 ):
-                    # per-(file, level, variant) seeding makes output independent of iteration order
                     np.testing.assert_array_equal(fa["Acc_x"][:], fb["Acc_x"][:])
-                    # IAS target is untouched
-                    np.testing.assert_array_equal(fa["IAS"][:], fb["IAS"][:])
+                    np.testing.assert_array_equal(fa["IAS"][:], fb["IAS"][:])  # the target is untouched
 
 
-def test_writer_runs_the_comb_at_another_recordings_speed(tmp_path):
+def test_writer_runs_the_comb_at_another_recordings_speed(tmp_path, monkeypatch):
     """The harmonic disturbance of each file sits at the other file's speed, never at its own."""
-    fs, n = 1000.0, 20_000
+    monkeypatch.setenv("IDENTIBENCH_WORKERS", "1")
+    fs = 2000.0
     speeds = {"rec_0": 10.0, "rec_1": 37.0}
-    for i, (stem, speed) in enumerate(speeds.items()):
-        _write_ias_file(tmp_path / "test" / f"{stem}.hdf5", np.full(n, speed), {"Acc_x": _coloured_noise(n, fs, i)})
+    _write_machine_dataset(tmp_path, {"train": [15.0], "test": list(speeds.values())}, fs=fs, seconds=20.0)
 
-    _common.write_disturbed_test_sets(tmp_path, noise_levels=[0], vib_keys=["Acc_x"])
+    _common.write_disturbed_test_sets(tmp_path, vib_keys=["Acc_x"], settings=_SETTINGS, noise_levels=[0])
 
-    freqs = np.fft.rfftfreq(n, 1 / fs)
     for stem, other in (("rec_0", "rec_1"), ("rec_1", "rec_0")):
         with (
             h5py.File(tmp_path / "test" / f"{stem}.hdf5") as clean,
             h5py.File(tmp_path / "test_disturbed_0dB_harmonic" / f"{stem}.hdf5") as disturbed,
         ):
-            spectrum = np.abs(np.fft.rfft(disturbed["Acc_x"][:] - clean["Acc_x"][:])) ** 2
+            comb = disturbed["Acc_x"][:].astype(np.float64) - clean["Acc_x"][:]
+        freqs = np.fft.rfftfreq(len(comb), 1 / fs)
+        spectrum = np.abs(np.fft.rfft(comb)) ** 2
 
-        def power_near(f, spectrum=spectrum):
+        def power_near(f, spectrum=spectrum, freqs=freqs):
             return spectrum[np.abs(freqs - f) < 0.5].sum()
 
         assert power_near(_common.HARMONIC_IAS_RATIO * speeds[other]) > 100 * power_near(
@@ -517,21 +671,91 @@ def test_writer_runs_the_comb_at_another_recordings_speed(tmp_path):
         ), stem
 
 
-def test_disturbed_copies_differ_per_file_and_level(tmp_path):
-    sig = np.sin(np.arange(500) * 0.1)
-    _write_ias_file(tmp_path / "test" / "rec_0.hdf5", np.ones(500), {"Acc_x": sig})
-    _write_ias_file(tmp_path / "test" / "rec_1.hdf5", np.ones(500), {"Acc_x": sig})
+def test_disturbed_copies_differ_per_file_and_scale_per_level(tmp_path, monkeypatch):
+    monkeypatch.setenv("IDENTIBENCH_WORKERS", "1")
+    _write_machine_dataset(tmp_path, {"train": [25.0], "test": [20.0, 30.0]})
+    _common.write_disturbed_test_sets(tmp_path, vib_keys=["Acc_x"], settings=_SETTINGS, noise_levels=[15, 7.5])
 
-    _common.write_disturbed_test_sets(tmp_path, noise_levels=[15, 7.5], vib_keys=["Acc_x"])
+    def noise(level, stem):
+        with (
+            h5py.File(tmp_path / "test" / f"{stem}.hdf5") as clean,
+            h5py.File(tmp_path / f"test_disturbed_{level}dB_combined" / f"{stem}.hdf5") as disturbed,
+        ):
+            return disturbed["Acc_x"][:].astype(np.float64) - clean["Acc_x"][:]
 
+    assert not np.allclose(noise(15, "rec_0")[:1000], noise(15, "rec_1")[:1000])  # each file its own noise
+    # the levels of a variant scale one realization (up to float32 storage)
+    np.testing.assert_allclose(noise(15, "rec_0") * 10 ** (7.5 / 20), noise(7.5, "rec_0"), atol=1e-5)
+
+
+def test_writer_stores_the_line_list_and_hits_the_level(tmp_path, monkeypatch):
+    monkeypatch.setenv("IDENTIBENCH_WORKERS", "1")
+    fs = 2000.0
+    _write_machine_dataset(tmp_path, {"train": [18.0, 25.0], "test": [20.0, 30.0]}, fs=fs, seconds=30.0)
+    _common.write_disturbed_test_sets(tmp_path, vib_keys=["Acc_x"], settings=_SETTINGS, noise_levels=[0])
+
+    lines = harmonics.load_dataset_lines(tmp_path)
+    assert lines.settings == _SETTINGS and lines.n_recordings == 4
+    np.testing.assert_allclose(np.sort(lines.orders), [1.0, 2.0, 3.0])
     with (
-        h5py.File(tmp_path / "test_disturbed_15dB_combined" / "rec_0.hdf5") as f0,
-        h5py.File(tmp_path / "test_disturbed_15dB_combined" / "rec_1.hdf5") as f1,
-        h5py.File(tmp_path / "test_disturbed_7.5dB_combined" / "rec_0.hdf5") as f2,
+        h5py.File(tmp_path / "test" / "rec_0.hdf5") as clean,
+        h5py.File(tmp_path / "test_disturbed_0dB_gaussian" / "rec_0.hdf5") as disturbed,
     ):
-        a, b, c = f0["Acc_x"][:], f1["Acc_x"][:], f2["Acc_x"][:]
-    assert not np.array_equal(a, b)  # same level, different file -> different noise
-    assert not np.array_equal(a, c)  # same file, different level -> different noise
+        snr = harmonics.line_snr(clean["Acc_x"][:], disturbed["Acc_x"][:], clean["IAS"][:], fs, lines.orders, lines.settings)
+    np.testing.assert_allclose(snr.long_term_snr_db(), 0.0, atol=1.0)
+
+
+# Opt-in check on the real prepared datasets: set IDENTIBENCH_IAS_DATA_ROOT to the directory holding the
+# prepared ball_bearing/, gas_foil_bearing/, ... (prepared with this version, i.e. with harmonic_lines.json).
+_IAS_DATA_ROOT = os.environ.get("IDENTIBENCH_IAS_DATA_ROOT")
+# strongest line of each dataset (all splits, all channels; measured 2026-10-19) and the channel checked
+_REAL_STRONGEST_LINE = {
+    "ball_bearing": (1.0, "Acc_x"),
+    "gas_foil_bearing": (1.0, "Acc_x"),
+    "parallel_gearbox": (95.0, "gearbox_vibration_x"),
+    "planetary_gearbox": (21.6875, "Acc_Carrier"),
+}
+
+
+@pytest.mark.skipif(_IAS_DATA_ROOT is None, reason="set IDENTIBENCH_IAS_DATA_ROOT to the prepared IAS datasets")
+@pytest.mark.parametrize("name", list(_REAL_STRONGEST_LINE))
+def test_real_disturbed_sets_put_the_strongest_line_at_the_level(name):
+    """The 0 dB gaussian copy of the first test file puts its strongest line near 0 dB (sweeps: up to +3)."""
+    ds = Path(_IAS_DATA_ROOT) / name
+    if not (ds / harmonics.HARMONIC_LINES_FILE).exists():
+        pytest.skip(f"{ds} was not prepared with harmonic-referenced disturbances")
+    lines = harmonics.load_dataset_lines(ds)
+    order, channel = _REAL_STRONGEST_LINE[name]
+    assert lines.strongest(1) == pytest.approx([order])
+    clean_file = min((ds / "test").glob("*.hdf5"))
+    with (
+        h5py.File(clean_file) as clean,
+        h5py.File(ds / "test_disturbed_0dB_gaussian" / clean_file.name) as disturbed,
+    ):
+        fs = float(clean.attrs["fs"])
+        snr = harmonics.line_snr(clean[channel][:], disturbed[channel][:], clean["IAS"][:], fs, lines.orders, lines.settings)
+    assert -1.0 < snr.long_term_snr_db()[snr.strongest_line()] < 3.0
+
+
+# recordings whose reference had 80-140 dB holes before occupancy was decided from exact counts
+_REAL_HOLE_CASES = {
+    "ball_bearing": ("H-C-3", "Acc_x"),
+    "parallel_gearbox": ("teeth_crack_H_torque_circulation_1000rpm_20Nm", "gearbox_vibration_x"),
+}
+
+
+@pytest.mark.skipif(_IAS_DATA_ROOT is None, reason="set IDENTIBENCH_IAS_DATA_ROOT to the prepared IAS datasets")
+@pytest.mark.parametrize("name", list(_REAL_HOLE_CASES))
+def test_real_references_have_no_holes(name):
+    ds = Path(_IAS_DATA_ROOT) / name
+    if not (ds / harmonics.HARMONIC_LINES_FILE).exists():
+        pytest.skip(f"{ds} was not prepared with harmonic-referenced disturbances")
+    lines = harmonics.load_dataset_lines(ds)
+    stem, channel = _REAL_HOLE_CASES[name]
+    with h5py.File(ds / "test" / f"{stem}.hdf5") as f:
+        grid = harmonics.AngleGrid.from_ias(f["IAS"][:], float(f.attrs["fs"]), lines.settings)
+        ref = harmonics.HarmonicReference.from_signal(f[channel][:].astype(np.float64), grid, lines.orders)
+    assert ref.density.min() > 1e-6 * np.median(ref.density)
 
 
 # ───────────────────────── HDF5 writing ─────────────────────────
@@ -574,15 +798,18 @@ def test_ias_test_sets_patterns():
     assert "wear" not in _common.ias_test_sets(ball_bearing_dataset, wear=False)
 
 
+_SYNTH_SAMPLES = 4000  # 4 s at fs=1000: 20 revolutions at 5 Hz, enough frame pairs for the disturbance writer
+
+
 def _build_synthetic_ias_dataset(ds, with_wear=True):
-    """A tiny ball-bearing-shaped dataset with known IAS targets, marked prepared."""
-    rng = np.random.default_rng(0)
+    """A small ball-bearing-shaped dataset with known IAS targets, marked prepared."""
+    speed = np.full(_SYNTH_SAMPLES, 5.0)
     for split, n_files in {"train": 1, "valid": 1, "test": 2}.items():
         for i in range(n_files):
-            _write_ias_file(ds / split / f"{split}_{i}.hdf5", np.full(100, 5.0), {"Acc_x": rng.standard_normal(100)})
+            _write_ias_file(ds / split / f"{split}_{i}.hdf5", speed, {"Acc_x": _machine(speed, 1000.0, seed=i)})
     if with_wear:
-        _write_ias_file(ds / "test_wear" / "wear_0.hdf5", np.full(100, 9.0), {"Acc_x": rng.standard_normal(100)})
-    _common.write_disturbed_test_sets(ds, noise_levels=[15], vib_keys=["Acc_x"])
+        _write_ias_file(ds / "test_wear" / "wear_0.hdf5", np.full(_SYNTH_SAMPLES, 9.0), {"Acc_x": _machine(speed, 1000.0)})
+    _common.write_disturbed_test_sets(ds, vib_keys=["Acc_x"], settings=HarmonicSettings(segment_revs=4), noise_levels=[15])
     # Adopt the synthetic data as a prepared cache. This must carry the dataset's *current*
     # version, or `ensure_exists` treats the directory as stale and downloads the real 200 kHz
     # archive instead of using the fixture.
@@ -601,7 +828,7 @@ def _narrowed_test_sets():
 def test_run_benchmark_on_synthetic_ias_dataset(tmp_path, monkeypatch):
     monkeypatch.setenv("IDENTIBENCH_DATA_ROOT", str(tmp_path))
     _build_synthetic_ias_dataset(tmp_path / "ball_bearing")
-    # 100-sample files at fs=1000 -> a 0.05 s window is 50 samples (2 windows/file).
+    # 4000-sample files at fs=1000 -> a 0.05 s window is 50 samples (80 windows/file).
     spec = dataclasses.replace(
         BenchmarkBallBearing_Estimation,
         task=WindowedEstimation(window_sec=0.05),
@@ -632,16 +859,16 @@ def test_run_benchmark_on_synthetic_ias_dataset(tmp_path, monkeypatch):
 
 def test_run_simulation_benchmark_on_synthetic_ias_dataset(tmp_path, monkeypatch):
     monkeypatch.setenv("IDENTIBENCH_DATA_ROOT", str(tmp_path))
-    _build_synthetic_ias_dataset(tmp_path / "ball_bearing")  # 100-sample files at fs=1000, basic IAS = 5.0 Hz
+    _build_synthetic_ias_dataset(tmp_path / "ball_bearing")  # 4000-sample files at fs=1000, basic IAS = 5.0 Hz
     spec = dataclasses.replace(BenchmarkBallBearing_Simulation, test_sets=_narrowed_test_sets())
 
     def build_model(context):
         def model(u, y_init, attrs):
-            # Free-run: the model gets the WHOLE 100-sample recording at once with an empty
+            # Free-run: the model gets the WHOLE recording at once with an empty
             # warm-up and returns one IAS estimate per sample (a real model would slide a
             # window over u; here a trivial zero output).
             assert y_init.shape == (0, 1)
-            assert len(u) == 100
+            assert len(u) == _SYNTH_SAMPLES
             return np.zeros((len(u), 1))
 
         return model
@@ -661,7 +888,7 @@ def test_run_simulation_benchmark_on_synthetic_ias_dataset(tmp_path, monkeypatch
 def test_run_gridwise_benchmark_on_synthetic_ias_dataset(tmp_path, monkeypatch):
     monkeypatch.setenv("IDENTIBENCH_DATA_ROOT", str(tmp_path))
     _build_synthetic_ias_dataset(tmp_path / "ball_bearing")
-    # 100-sample files at fs=1000 -> a 0.05 s window / 0.01 s step gives 6 query points/file.
+    # 4000-sample files at fs=1000 -> a 0.05 s window / 0.01 s step gives 396 query points/file.
     spec = dataclasses.replace(
         BenchmarkBallBearing_Estimation,
         task=GridwiseEstimation(window_sec=0.05, step_sec=0.01),
@@ -673,7 +900,7 @@ def test_run_gridwise_benchmark_on_synthetic_ias_dataset(tmp_path, monkeypatch):
             assert y_init.shape == (0, 1)
             t_query = attrs["t_query"]
             # Returns a plain Python list, not an ndarray -- exercises the list-coercion fix.
-            return [0.0] * len(t_query)
+            return [5.02] * len(t_query)
 
         return model
 

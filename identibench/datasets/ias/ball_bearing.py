@@ -25,6 +25,12 @@ from ._common import (
     ias_test_sets,
     write_disturbed_test_sets,
 )
+from .harmonics import HarmonicSettings
+
+# Angle-domain analysis of the disturbed test sets (`harmonics`): 4-revolution frames (0.25-order
+# resolution) leave ~50 frame pairs in the 10 s recordings and still separate the shaft orders from
+# BPFO 3.57 / BPFI 5.43; the 20 kHz cutoff covers every line the models' bands can hold.
+HARMONIC_SETTINGS = HarmonicSettings(segment_revs=4, cutoff_hz=20000.0)
 
 _INFO = DatasetInfo(
     name="Ball_Bearing",
@@ -98,10 +104,10 @@ def dl_ball_bearing(
                 save_path / target_subdir / f"{file.stem}.hdf5",
                 fs=fs,
                 gear_ratio=1,
-                ias_bandwidth_hz=_IAS_BANDWIDTH_HZ,
+                ias_bandwidth_orders=_CUTOFF_ORDER,
             )
 
-    write_disturbed_test_sets(save_path, vib_keys=["Acc_x"])
+    write_disturbed_test_sets(save_path, vib_keys=["Acc_x"], settings=HARMONIC_SETTINGS)
 
 
 # version 2: order-domain IAS filtering (was a savgol + fixed 12.5 Hz time-domain low-pass).
@@ -113,7 +119,9 @@ def dl_ball_bearing(
 # version 9: disturbed test sets rebuilt: the harmonic interferer runs at another test file's
 # speed profile (was tied to this file's own IAS), and the SNR is defined per 1/12-octave band, with the noise
 # shaped like the signal's spectrum (was white noise against the total power).
-ball_bearing_dataset = Dataset("ball_bearing", prepare=dl_ball_bearing, version="9")
+# version 10: disturbed test sets referenced to the speed-locked harmonics (`harmonics`): every line
+# sits S dB above the noise in its one-order band (was: the clean spectrum per 1/12 octave).
+ball_bearing_dataset = Dataset("ball_bearing", prepare=dl_ball_bearing, version="11")
 
 _ball_bearing = dict(
     u_cols=["Acc_x"],

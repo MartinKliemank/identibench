@@ -213,12 +213,34 @@ The variants are `combined` (all three components, noise power split evenly),
 `harmonic` (a nearby machine: a line comb running at the speed profile of
 another recording at a clearly different speed, so it carries no information
 about the file's own label), `gaussian` and `impulsive` (clipped Lévy-stable).
-The SNR is defined per 1/12-octave band: every disturbance is shaped like the
-clean signal's long-term spectrum, so on average over the bands a level means
-the same at any frequency, sampling rate or decimation (bands right beside a
-strong spectral line get more noise than their own power warrants). For the
-gaussian and impulsive components the total SNR equals the level as well; the
-harmonic comb only fills the bands that contain one of its lines. All
+The level is the SNR of the recording's **speed-locked harmonics**: a line found
+in the angle domain (the vibration resampled with the IAS label, see
+`identibench.datasets.ias.harmonics`) carries that many dB more power than the
+disturbance inside its own one-order band (one revolution of data), whatever band a
+method keeps. The gaussian and impulsive components are shaped like the harmonics'
+reference spectrum; the comb puts each interfering line that many dB below an own
+harmonic at its frequency (where its lines are denser than the own orders, its power
+per own order). This is exact at constant speed. For sweeping recordings a
+stationary disturbance can only be a compromise: the strongest line sits within
+~0.5–2 dB of the level, weaker lines that pass the same frequencies at other times
+(the gas foil bearing's 2x/3x under its 1x), or sit within one order of a stronger
+line, below it. Each prepared dataset stores its line list as
+`harmonic_lines.json`, and `line_snr` measures the realised per-line SNR of any
+disturbed copy per analysis frame, e.g. to report errors against the SNR a method
+actually saw:
+
+```python
+from identibench.datasets.ias import line_snr, load_dataset_lines
+
+lines = load_dataset_lines(dataset_dir)  # orders strongest first, plus the analysis settings
+snr = line_snr(clean, disturbed, ias, fs, lines.orders, lines.settings)
+k = snr.strongest_line(max_freq_hz=fs_model / 2)  # the strongest line inside the method's band
+snr.frame_time, snr.snr_db()[:, k]  # per-frame SNR of that line
+```
+
+The stored list is found on all splits. For lines handed to an estimation method as
+prior knowledge, find them on the training split only:
+`dataset_lines(dataset_dir, channels, settings, splits=("train",))`. All
 conditions are scored into `result["test_sets"]`.
 
 These live in `identibench.datasets.ias` and the `idb.ias_benchmarks` registry.
@@ -533,8 +555,8 @@ direct interaction or adding new datasets.
   datasets at once. Zip extraction and the IAS datasets' disturbed test
   sets run in parallel on the CPUs available to the process (on a cluster:
   the job's allocation), capped at 8; set `IDENTIBENCH_WORKERS` to change
-  the count. A disturbed-test-set worker holds ~120 bytes per sample of its
-  largest channel (~4.3 GB for a planetary gearbox recording).
+  the count. A disturbed-test-set worker holds ~140 bytes per sample of its
+  recording (~5 GB and ~6 min for a planetary gearbox recording).
 - **File Format:** Processed time-series data is stored in the **HDF5
   (`.hdf5`)** format.
 - **HDF5 Structure:**

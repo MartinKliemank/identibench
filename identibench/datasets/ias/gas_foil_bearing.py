@@ -25,6 +25,12 @@ from ._common import (
     ias_test_sets,
     write_disturbed_test_sets,
 )
+from .harmonics import HarmonicSettings
+
+# Angle-domain analysis of the disturbed test sets (`harmonics`): 8-revolution frames (0.125-order
+# resolution, enough for 1x-6x and sub-synchronous orders); frames slower than 60 Hz
+# (start-up and run-out) are left out, which keeps the angle grid at 512 samples per revolution.
+HARMONIC_SETTINGS = HarmonicSettings(segment_revs=8, cutoff_hz=10000.0, min_speed_hz=60.0)
 
 _INFO = DatasetInfo(
     name="Gas_Foil_Bearing",
@@ -51,7 +57,8 @@ def _copy_with_idb_attrs(src: Path, dest_dir: Path) -> None:
             f.attrs["fs"] = float(f.attrs["sampling_rate"])
             del f.attrs["sampling_rate"]
         f.attrs["gear_ratio"] = 1
-        f.attrs["ias_bandwidth_hz"] = _IAS_BANDWIDTH_HZ
+        f.attrs["ias_bandwidth"] = float(_IAS_BANDWIDTH_HZ)
+        f.attrs["ias_bandwidth_units"] = "Hz"
 
 
 def dl_gas_foil_bearing(
@@ -105,7 +112,7 @@ def dl_gas_foil_bearing(
             for path in tqdm(paths, desc=f"Copying {subdir} files"):
                 _copy_with_idb_attrs(path, save_path / subdir)
 
-    write_disturbed_test_sets(save_path, vib_keys=["Acc_x", "Acc_y"])
+    write_disturbed_test_sets(save_path, vib_keys=["Acc_x", "Acc_y"], settings=HARMONIC_SETTINGS)
 
 
 # version 2: the upstream pre-converted archive behind `_INFO.zip_url` was replaced. This
@@ -117,7 +124,11 @@ def dl_gas_foil_bearing(
 # version 9: disturbed test sets rebuilt: the harmonic interferer runs at another test file's
 # speed profile (was tied to this file's own IAS), and the SNR is defined per 1/12-octave band, with the noise
 # shaped like the signal's spectrum (was white noise against the total power).
-gas_foil_bearing_dataset = Dataset("gas_foil_bearing", prepare=dl_gas_foil_bearing, version="9")
+# version 10: disturbed test sets referenced to the speed-locked harmonics (`harmonics`): every line
+# sits S dB above the noise in its one-order band (was: the clean spectrum per 1/12 octave).
+# version 12: new upstream archive: label low-pass -3 dB at 40 Hz (was -6 dB at 40 Hz), freeze bridging at
+# the converter's gate switches reworked, standstill trimmed to at most 1.5 s at each end (attrs["t_start"]).
+gas_foil_bearing_dataset = Dataset("gas_foil_bearing", prepare=dl_gas_foil_bearing, version="12")
 
 _gas_foil_bearing = dict(
     u_cols=["Acc_x", "Acc_y"],

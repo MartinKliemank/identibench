@@ -26,6 +26,11 @@ from ._common import (
     ias_test_sets,
     write_disturbed_test_sets,
 )
+from .harmonics import HarmonicSettings
+
+# Angle-domain analysis of the disturbed test sets (`harmonics`): 16-revolution frames (1/16-order
+# resolution) separate the meshes' +-0.4 (output shaft) and +-1 sidebands; cutoff 0.42 fs.
+HARMONIC_SETTINGS = HarmonicSettings(segment_revs=16)
 
 _INFO = DatasetInfo(
     name="Parallel_Gearbox",
@@ -209,10 +214,14 @@ def dl_parallel_gearbox(
                 save_path / split_of[file] / f"{file.stem}.hdf5",
                 fs=_FS,
                 gear_ratio=[95 / 29, 95, 1, 36, 36 / 90],
-                ias_bandwidth_hz=_IAS_BANDWIDTH_HZ,
+                ias_bandwidth_orders=_CUTOFF_ORDER,
             )
 
-    write_disturbed_test_sets(save_path, vib_keys=["gearbox_vibration_x", "gearbox_vibration_y", "gearbox_vibration_z"])
+    write_disturbed_test_sets(
+        save_path,
+        vib_keys=["gearbox_vibration_x", "gearbox_vibration_y", "gearbox_vibration_z"],
+        settings=HARMONIC_SETTINGS,
+    )
 
 
 # version 2: order-domain IAS filtering (was a savgol + fixed 12.5 Hz time-domain low-pass).
@@ -223,7 +232,9 @@ def dl_parallel_gearbox(
 # version 8: disturbed test sets rebuilt: the harmonic interferer runs at another test file's
 # speed profile (was tied to this file's own IAS), and the SNR is defined per 1/12-octave band, with the noise
 # shaped like the signal's spectrum (was white noise against the total power).
-parallel_gearbox_dataset = Dataset("parallel_gearbox", prepare=dl_parallel_gearbox, version="8")
+# version 9: disturbed test sets referenced to the speed-locked harmonics (`harmonics`): every line
+# sits S dB above the noise in its one-order band (was: the clean spectrum per 1/12 octave).
+parallel_gearbox_dataset = Dataset("parallel_gearbox", prepare=dl_parallel_gearbox, version="11")
 
 _parallel_gearbox = dict(
     u_cols=["gearbox_vibration_x", "gearbox_vibration_y", "gearbox_vibration_z"],

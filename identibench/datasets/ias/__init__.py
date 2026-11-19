@@ -47,8 +47,16 @@ its spectral methods reach their tuned resolution.
 Each dataset exposes several named test conditions as explicit test-set
 patterns (see :func:`._common.ias_test_sets`): ``basic`` (in-distribution, the
 headline), ``wear`` (out-of-distribution fault severities; absent for the gas
-foil bearing), and ``disturbed_{15,7.5,0}dB`` (copies of ``basic`` with
-reproducible synthetic sensor noise at decreasing SNR).
+foil bearing), and ``disturbed_{15,7.5,0,-7.5}dB_{variant}`` (copies of ``basic`` with
+reproducible synthetic disturbances at decreasing SNR). The SNR is that of the
+recording's speed-locked harmonics: every line carries that many dB more power than
+the disturbance inside its own one-order band (one revolution of data), whatever
+band a method keeps. :mod:`.harmonics` finds those lines (``dataset_lines``; each
+prepared dataset stores its list as ``harmonic_lines.json``, see
+``load_dataset_lines``) and measures the realised per-line SNR of any disturbed copy,
+per analysis frame and in the long term (``line_snr``), e.g. to report errors
+against the SNR a method actually saw. Each dataset module's ``HARMONIC_SETTINGS``
+holds the analysis settings it was prepared with.
 
 Model contract: ``build_model`` must return a callable
 ``model(u_window, y_init, attrs) -> np.ndarray`` that maps one input window to an
@@ -87,6 +95,8 @@ TU-Berlin cloud link.
 """
 
 from ...benchmark import WindowedEstimation, GridwiseEstimation
+from . import harmonics
+from .harmonics import HarmonicSettings, LineList, LineSNR, dataset_lines, line_snr, load_dataset_lines
 from .ball_bearing import (
     BenchmarkBallBearing_Estimation,
     BenchmarkBallBearing_Simulation,
@@ -136,6 +146,13 @@ ias_benchmarks = {
 __all__ = [
     "WindowedEstimation",
     "GridwiseEstimation",
+    "harmonics",
+    "HarmonicSettings",
+    "LineList",
+    "LineSNR",
+    "dataset_lines",
+    "line_snr",
+    "load_dataset_lines",
     "ball_bearing_dataset",
     "parallel_gearbox_dataset",
     "planetary_gearbox_dataset",

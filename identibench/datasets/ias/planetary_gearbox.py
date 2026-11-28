@@ -21,9 +21,12 @@ angle reference. Four properties of the raw tacho data shape the pipeline:
   whole stripe at the highest speeds -- which is compensated before the reference is used.
 
 Self-calibration assumes uniform rotation over each revolution, so it also removes any genuinely
-sun-synchronous (integer-order) speed variation. Checked against the 1PR at the 13 sun phases it
-samples, what that removes is at most ~0.1 % of speed; non-integer content such as the gear mesh
-(10.75 sun orders) and the sun's rotation relative to the carrier (0.827 orders) is kept.
+sun-synchronous (integer-order) speed variation. The one large case, the drive's order-12 ripple
+that a torsional resonance amplifies to several % of speed, is handled separately: the template's
+order-12 component is the part that does not change with speed (``_SYNC_ORDER``). For the other
+orders, checked against the 1PR at the 13 sun phases it samples, what is removed is at most ~0.1 % of
+speed; non-integer content such as the gear mesh (10.75 sun orders) and the sun's rotation relative
+to the carrier (0.827 orders) is kept.
 """
 
 __all__ = [
@@ -157,12 +160,31 @@ _TEMPLATE_BORROW = {"G1_P1_slow_38400Hz": ("G1_P1_38400Hz",)}
 # Self-calibration uses edge intervals spanning at most this many stripes.
 _CAL_MAX_STEP = 12
 
+# The drive puts a ripple on the sun at exactly order 12 (DC-motor commutation), which a torsional
+# resonance at ~66 Hz amplifies to several % of speed where 12x the sun speed crosses it (sun ~5-6 Hz).
+# Being sun-synchronous, it looks to the self-calibration exactly like a stripe-position error, so each
+# recording's calibration absorbed its own speed-weighted average of it: up to ~1.3 % of false order-12
+# ripple in the G1 labels, whose ramps cross the resonance. The tape's own order-12 component is instead
+# taken as the part that does not change with speed: the calibration is repeated in `_SYNC_BIN_HZ` speed
+# bins from `_SYNC_MIN_HZ` (above the resonance peak) and fitted as a per-recording constant plus one
+# speed curve shared by all recordings, taken as zero from `_SYNC_FREE_HZ`, where the resonance has died
+# away. The constants agree to ~0.1 % of speed across reasonable choices of these settings, and with each
+# other within a template group (all recordings: 1.0-1.3 % at -10 to -40 deg).
+_SYNC_ORDER = 12
+_SYNC_MIN_HZ = 7.0
+_SYNC_FREE_HZ = 17.0
+_SYNC_BIN_HZ = 0.5
+# A speed bin is calibrated once its intervals span at least this many revolutions.
+_SYNC_MIN_REVS = 50
+
 # A dark bar whose width departs from that stripe's usual width by more than this many stripe
 # spacings is not used as a stripe centre. Mostly these are two neighbouring bars read as one (the
 # light gap between them did not register, so the falling edge belongs to the earlier bar and the
 # midpoint lands between the two stripes: ~1 % of G2_P0's bars, deviating by about a whole spacing);
 # a few are bars that registered much narrower than usual. The normal scatter is 0.013-0.02.
 _BAR_WIDTH_TOL = 0.1
+
+_PPR = 76
 
 
 def _parse_fs(mat_data: dict) -> float:
@@ -449,6 +471,59 @@ def drop_zebra_outliers(
     return t, idx
 
 
+def _normal_equations(k0: np.ndarray, k1: np.ndarray, x: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Least-squares normal equations for the ``n`` stripe spacings.
+
+    Each interval ``k0 -> k1`` is the sum of the spacings ending at stripes ``k0+1 .. k1`` and was
+    measured as ``x`` (a fraction of a revolution).
+    """
+    AtA, Atb = np.zeros((n, n)), np.zeros(n)
+    for step in np.unique(k1 - k0):
+        sel = k1 - k0 == step
+        first = (k0[sel] + 1) % n
+        cnt = np.bincount(first, minlength=n)
+        tot = np.bincount(first, weights=x[sel], minlength=n)
+        for s0 in np.flatnonzero(cnt):
+            cols = (s0 + np.arange(step)) % n
+            AtA[np.ix_(cols, cols)] += cnt[s0]
+            Atb[cols] += tot[s0]
+    return AtA, Atb
+
+
+def _sync_component(spacing: np.ndarray) -> complex:
+    """Complex amplitude of the ``_SYNC_ORDER`` component of a spacing pattern, as a relative rate."""
+    return complex(np.fft.rfft(spacing * len(spacing) - 1)[_SYNC_ORDER] * 2 / len(spacing))
+
+
+def _speed_independent_sync(binned: dict[str, list[tuple[int, complex]]]) -> dict[str, complex]:
+    """Per recording, the part of the order-12 stripe component that does not change with speed.
+
+    ``binned`` maps each stem to ``(speed_bin, component)`` pairs from calibrations within speed bins.
+    They are fitted jointly as ``component = T[stem] + R[speed_bin]``: the tape is the same at every
+    speed, the drive ripple behind the resonance is the same function of speed in every recording, and
+    ``R`` is zero from ``_SYNC_FREE_HZ`` up, which is what separates the two.
+
+    Returns:
+        ``{stem: T}`` for every stem with at least one calibrated speed bin.
+
+    Raises:
+        RuntimeError: If the speed ranges do not overlap enough to separate ``T`` from ``R``.
+    """
+    stems = [s for s in binned if binned[s]]
+    n_free = int(round((_SYNC_FREE_HZ - _SYNC_MIN_HZ) / _SYNC_BIN_HZ))
+    rows = [(i, b, value) for i, s in enumerate(stems) for b, value in binned[s]]
+    r_bins = sorted({b for _, b, _ in rows if b < n_free})  # speed bins where R is free
+    design = np.zeros((len(rows), len(stems) + len(r_bins)), complex)
+    for r, (i, b, _) in enumerate(rows):
+        design[r, i] = 1
+        if b < n_free:
+            design[r, len(stems) + r_bins.index(b)] = 1
+    if np.linalg.matrix_rank(design) < design.shape[1]:
+        raise RuntimeError("speed ranges too disjoint to separate the order-12 tape component from the drive ripple")
+    coef = np.linalg.lstsq(design, np.array([value for _, _, value in rows]), rcond=None)[0]
+    return dict(zip(stems, coef[: len(stems)]))
+
+
 def calibrate_zebra(
     recordings: dict[str, dict[str, np.ndarray]],
 ) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
@@ -462,7 +537,9 @@ def calibrate_zebra(
     solution over all intervals of the recording -- together with those of the other members of its
     ``_TEMPLATE_GROUPS`` group and of the recordings it ``_TEMPLATE_BORROW``-s from, where present.
     Stripe identity comes from the shared bootstrap template, so the same index is the same
-    physical stripe in every recording.
+    physical stripe in every recording. Finally, the order-12 component of each template is replaced
+    by the speed-independent part of those recordings' (:func:`_speed_independent_sync`): at any
+    single speed the drive's order-12 ripple is indistinguishable from a stripe-position error.
 
     Args:
         recordings: Per recording stem, ``t_ref`` (from :func:`reference_events`) and ``t_rise`` /
@@ -489,7 +566,7 @@ def calibrate_zebra(
             f"too low for the {_CUTOFF_ORDER}-order cutoff"
         )
 
-    centres, normal = {}, {}
+    centres, normal, binned = {}, {}, {}
     for stem, r in recordings.items():
         t, idx, n_dropped = count_zebra_stripes(
             r["t_rise"], r["t_ref"], template, zebra_phase_offset(phases[stem], pooled_hist)
@@ -535,18 +612,18 @@ def calibrate_zebra(
         period = t_at[start + n - g0] - t_at[start - g0]
         use = (k1 - k0 <= _CAL_MAX_STEP) & (start <= k0) & (k1 <= start + n) & np.isfinite(period)
         k0, k1, x = k0[use], k1[use], dt[use] / period[use]
-        AtA, Atb = np.zeros((n, n)), np.zeros(n)
-        for step in np.unique(k1 - k0):
-            sel = k1 - k0 == step
-            first = (k0[sel] + 1) % n
-            cnt = np.bincount(first, minlength=n)
-            tot = np.bincount(first, weights=x[sel], minlength=n)
-            for s0 in np.flatnonzero(cnt):
-                cols = (s0 + np.arange(step)) % n
-                AtA[np.ix_(cols, cols)] += cnt[s0]
-                Atb[cols] += tot[s0]
-        normal[stem] = (AtA, Atb)
+        normal[stem] = _normal_equations(k0, k1, x, n)
 
+        # The same solve within sun-speed bins above the resonance, for the order-12 tape component.
+        speed_bin = np.floor((1 / period[use] - _SYNC_MIN_HZ) / _SYNC_BIN_HZ).astype(int)
+        binned[stem] = []
+        for b in np.unique(speed_bin[speed_bin >= 0]):
+            sel = speed_bin == b
+            if np.sum(k1[sel] - k0[sel]) >= _SYNC_MIN_REVS * n:
+                spacing = np.linalg.lstsq(*_normal_equations(k0[sel], k1[sel], x[sel], n), rcond=None)[0]
+                binned[stem].append((int(b), _sync_component(spacing / spacing.sum())))
+
+    sync = _speed_independent_sync(binned)
     labels = {}
     for stem in recordings:
         pool = next((g for g in _TEMPLATE_GROUPS if stem in g), (stem,)) + _TEMPLATE_BORROW.get(stem, ())
@@ -557,9 +634,22 @@ def calibrate_zebra(
         spacing = np.linalg.lstsq(
             sum(normal[s][0] for s in group), sum(normal[s][1] for s in group), rcond=None
         )[0]
+        spacing /= spacing.sum()
+        # Order 12 from the speed-independent part of the recordings behind this template. A template
+        # none of whose recordings runs above the resonance keeps its own (none on the real data:
+        # G1_P1_slow takes G1_P1's, which it borrows from).
+        known = [sync[s] for s in group if s in sync]
+        if known:
+            absorbed = _sync_component(spacing)
+            spectrum = np.fft.rfft(spacing * n - 1)
+            spectrum[_SYNC_ORDER] = np.mean(known) * n / 2
+            spacing = (1 + np.fft.irfft(spectrum, n)) / n
+            print(
+                f"  {stem}: order-{_SYNC_ORDER} stripe component {100 * abs(absorbed):.2f} % -> "
+                f"{100 * abs(np.mean(known)):.2f} % of speed ({100 * abs(np.mean(known) - absorbed):.2f} % absorbed drive ripple removed)"
+            )
         if (spacing <= 0).any():
             raise RuntimeError(f"self-calibration of {group} gave a non-positive stripe spacing")
-        spacing /= spacing.sum()
         # spacing[k] runs from stripe k-1 to stripe k, so stripe 0 sits at 0 and the rest follow.
         labels[stem] = (*centres[stem], np.concatenate([[0.0], np.cumsum(spacing[1:])]))
     return labels

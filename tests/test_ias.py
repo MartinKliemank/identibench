@@ -1038,7 +1038,10 @@ def test_registration():
         assert isinstance(spec.task, GridwiseEstimation)
         assert spec.task.window_sec == 3.0  # uniform context guarantee, unrelated to resolution
         assert spec.task.step_sec == expected_step
-        assert spec.task.min_targ == 1.0  # 60 rpm: only standstill drops out of the headline
+        if key.startswith("GasFoilBearing"):
+            assert spec.task.min_targ == 10.0  # label uncertainty above the 1 % tolerance below 10 Hz
+        else:
+            assert spec.task.min_targ == 1.0  # 60 rpm: only standstill drops out of the headline
         assert next(iter(spec.test_sets)) == "basic"  # built-in tasks headline the first set
         assert spec.y_cols == ["IAS"]
 

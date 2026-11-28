@@ -19,7 +19,6 @@ from ...benchmark import BenchmarkSpec, Simulation, WindowedEstimation, Gridwise
 from ...dataset import Dataset
 from ...metrics import mae
 from ._common import (
-    MIN_SCORED_IAS_HZ,
     DatasetInfo,
     _require_sklearn,
     download_and_unpack,

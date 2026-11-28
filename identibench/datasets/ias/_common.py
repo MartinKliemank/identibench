@@ -30,7 +30,8 @@ DISTURBANCE_LEVELS = [15, 7.5, 0, -7.5]
 
 # Speeds at or below this are not scored by the GridwiseEstimation headline (relative error), as at standstill
 # the relative error is undefined. 1 Hz (60 rpm) is below every dataset's slowest normal running (parallel gearbox:
-# 1.16 Hz), so only standstill drops out.
+# 1.16 Hz), so only standstill drops out. The gas foil bearing overrides it with 10 Hz (its converter-based label
+# is not accurate enough below that; see gas_foil_bearing._MIN_SCORED_IAS_HZ).
 MIN_SCORED_IAS_HZ = 1.0
 
 # Disturbed-test-set variants: "combined" sums the harmonic/gaussian/impulsive components

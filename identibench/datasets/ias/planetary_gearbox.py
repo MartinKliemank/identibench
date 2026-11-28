@@ -798,7 +798,10 @@ def dl_planetary_gearbox(
 # shaped like the signal's spectrum (was white noise against the total power).
 # version 11: disturbed test sets referenced to the speed-locked harmonics (`harmonics`): every line
 # sits S dB above the noise in its one-order band (was: the clean spectrum per 1/12 octave).
-planetary_gearbox_dataset = Dataset("planetary_gearbox", prepare=dl_planetary_gearbox, version="11")
+# version 12: fix order of reciprocal and lowpass to filter periods directly
+# version 13: order-12 stripe component taken from its speed-independent part (drive ripple no longer absorbed)
+# swap files between splits to achieve equal speed range in all splits
+planetary_gearbox_dataset = Dataset("planetary_gearbox", prepare=dl_planetary_gearbox, version="14")
 
 _planetary_gearbox = dict(
     u_cols=["Acc_Carrier", "Acc_Sun"],

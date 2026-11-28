@@ -148,7 +148,9 @@ def dl_gas_foil_bearing(
 # sits S dB above the noise in its one-order band (was: the clean spectrum per 1/12 octave).
 # version 12: new upstream archive: label low-pass -3 dB at 40 Hz (was -6 dB at 40 Hz), freeze bridging at
 # the converter's gate switches reworked, standstill trimmed to at most 1.5 s at each end (attrs["t_start"]).
-gas_foil_bearing_dataset = Dataset("gas_foil_bearing", prepare=dl_gas_foil_bearing, version="12")
+# version 13: new upstream archive: lag floor f0 = 3 Hz (was 6), the label error below 20 Hz shaft speed drops 2-4x.
+# Random2/Random3 recordings moved out of train/valid/test into the new `test_ood` set.
+gas_foil_bearing_dataset = Dataset("gas_foil_bearing", prepare=dl_gas_foil_bearing, version="13")
 
 _gas_foil_bearing = dict(
     u_cols=["Acc_x", "Acc_y"],

@@ -122,7 +122,8 @@ def dl_ball_bearing(
 # shaped like the signal's spectrum (was white noise against the total power).
 # version 10: disturbed test sets referenced to the speed-locked harmonics (`harmonics`): every line
 # sits S dB above the noise in its one-order band (was: the clean spectrum per 1/12 octave).
-ball_bearing_dataset = Dataset("ball_bearing", prepare=dl_ball_bearing, version="11")
+# version 12: fix order of reciprocal and lowpass to filter periods directly
+ball_bearing_dataset = Dataset("ball_bearing", prepare=dl_ball_bearing, version="12")
 
 _ball_bearing = dict(
     u_cols=["Acc_x"],

@@ -235,7 +235,8 @@ def dl_parallel_gearbox(
 # shaped like the signal's spectrum (was white noise against the total power).
 # version 9: disturbed test sets referenced to the speed-locked harmonics (`harmonics`): every line
 # sits S dB above the noise in its one-order band (was: the clean spectrum per 1/12 octave).
-parallel_gearbox_dataset = Dataset("parallel_gearbox", prepare=dl_parallel_gearbox, version="11")
+# version 12: fix order of reciprocal and lowpass to filter periods directly, more accurate time shift
+parallel_gearbox_dataset = Dataset("parallel_gearbox", prepare=dl_parallel_gearbox, version="12")
 
 _parallel_gearbox = dict(
     u_cols=["gearbox_vibration_x", "gearbox_vibration_y", "gearbox_vibration_z"],

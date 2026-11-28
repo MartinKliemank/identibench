@@ -53,7 +53,7 @@ _PPR = 1
 _IAS_BANDWIDTH_HZ = 15.29 * 95 / 29 * _CUTOFF_ORDER  # 4.03 Hz
 
 # Seconds the speed channel lags the vibration in the `_FILES_TO_SHIFT` recordings.
-_SPEED_LAG_SEC = 0.82
+_SPEED_LAG_SEC = 0.812
 
 # Skipped upstream because the IAS measurement stops early / is intermittent (verbatim).
 _SKIPPED_STEMS = {

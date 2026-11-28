@@ -73,11 +73,11 @@ _INFO = DatasetInfo(
     },
 )
 
-# Crack severities forming the out-of-distribution wear set; G1_P4/G2_P1 are the
-# basic test recordings and G1_P3/G2_P0 the validation recordings (verbatim split).
-_TEST_WEAR_TYPES = ["P5", "P6", "P7"]
+# Crack severities forming the out-of-distribution (ood) set; G1_P4/G2_P1 are the
+# basic test recordings and G1_P3/G2_P3 the validation recordings.
+_TEST_OOD_TYPES = ["P5", "P6", "P7"]
 _TEST_BASIC_TYPES = ["G1_P4", "G2_P1"]
-_VALID_TYPES = ["G1_P3", "G2_P0"]
+_VALID_TYPES = ["G1_P0", "G2_P3"]
 
 # Bonfiglioli 300-L: 13 sun teeth, 24 planet, 62 ring. With the ring fixed the sun turns
 # (13 + 62) / 13 times per carrier revolution, which is what converts the carrier-mounted
@@ -626,7 +626,7 @@ def dl_planetary_gearbox(
     ~2.5 GB .MAT is therefore read once per pass and never held in full alongside the others.
     """
     save_path = Path(save_path)
-    for split in ("train", "valid", "test", "test_wear"):
+    for split in ("train", "valid", "test", "test_ood"):
         (save_path / split).mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -664,8 +664,8 @@ def dl_planetary_gearbox(
             }
             del mat_data
             stem = mat_file.stem
-            if any(t in stem for t in _TEST_WEAR_TYPES):
-                target_subdir = "test_wear"
+            if any(t in stem for t in _TEST_OOD_TYPES):
+                target_subdir = "test_ood"
             elif any(t in stem for t in _TEST_BASIC_TYPES):
                 target_subdir = "test"
             elif any(t in stem for t in _VALID_TYPES):

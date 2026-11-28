@@ -539,18 +539,18 @@ def write_disturbed_test_sets(
                     pbar.update(per_file)
 
 
-def ias_test_sets(dataset: Dataset, wear: bool = True) -> dict[str, list[tuple[Dataset, str]]]:
+def ias_test_sets(dataset: Dataset, ood: bool = True) -> dict[str, list[tuple[Dataset, str]]]:
     """The named test conditions of an IAS spec as patterns, headline (``basic``) first.
 
-    Maps each condition to its directory: ``basic`` → ``test/``, ``wear`` →
-    ``test_wear/`` (only where the dataset has a wear condition), and one
+    Maps each condition to its directory: ``basic`` → ``test/``, ``ood`` →
+    ``test_ood/`` (out-of-distribution; only where the dataset has one), and one
     ``disturbed_<level>dB_<variant>`` → ``test_disturbed_<level>dB_<variant>/``
     per level in ``DISTURBANCE_LEVELS`` × variant in ``DISTURBANCE_VARIANTS``
     (``combined`` first among the variants, as the per-level headline).
     """
     dirs = {"basic": "test"}
-    if wear:
-        dirs["wear"] = "test_wear"
+    if ood:
+        dirs["ood"] = "test_ood"
     dirs |= {
         f"disturbed_{level}dB_{variant}": f"test_disturbed_{level}dB_{variant}"
         for level in DISTURBANCE_LEVELS

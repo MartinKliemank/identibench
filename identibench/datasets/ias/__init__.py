@@ -46,8 +46,8 @@ its spectral methods reach their tuned resolution.
 
 Each dataset exposes several named test conditions as explicit test-set
 patterns (see :func:`._common.ias_test_sets`): ``basic`` (in-distribution, the
-headline), ``wear`` (out-of-distribution fault severities; absent for the gas
-foil bearing), and ``disturbed_{15,7.5,0,-7.5}dB_{variant}`` (copies of ``basic`` with
+headline), ``ood`` (out-of-distribution: unseen fault severities, or unseen speed
+trajectories for the gas foil bearing), and ``disturbed_{15,7.5,0,-7.5}dB_{variant}`` (copies of ``basic`` with
 reproducible synthetic disturbances at decreasing SNR). The SNR is that of the
 recording's speed-locked harmonics: every line carries that many dB more power than
 the disturbance inside its own one-order band (one revolution of data), whatever

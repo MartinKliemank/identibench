@@ -39,6 +39,9 @@ _INFO = DatasetInfo(
 # e.g. Load1_1_UpDown11s_03.hdf5  or  Load2_1_2_Random2_01.hdf5
 _FILENAME_PATTERN = re.compile(r"^(Load\d+)_(\d+(?:_\d+)*)_([A-Za-z][A-Za-z0-9]*)_(\d{2})(\.hdf5)$")
 
+# Random speed trajectories never seen in training; they form the out-of-distribution set.
+_TEST_OOD_TRAJECTORIES = {"Random2", "Random3"}
+
 
 # Highest frequency the label retains. Unlike the other three this is not an order cutoff: the
 # IAS comes from an analog RPM channel that the upstream TDMS conversion low-pass filters in the
@@ -76,14 +79,15 @@ def dl_gas_foil_bearing(
     """Download the pre-converted HDF5 archive, split, and add disturbed test sets.
 
     The archive is already HDF5 (TDMS conversion happened upstream), so no
-    signal preprocessing is needed. There is no wear condition for this dataset.
+    signal preprocessing is needed. There is no wear condition; instead the
+    ``_TEST_OOD_TRAJECTORIES`` recordings form the out-of-distribution ``test_ood`` set.
     Upstream, every recording was trimmed to its rotating span plus at most 1.5 s of
     standstill at either end; ``attrs["t_start"]`` is the time of its first kept sample
     in the original recording, in s.
     """
     train_test_split = _require_sklearn()
     save_path = Path(save_path)
-    for split in ("train", "valid", "test"):
+    for split in ("train", "valid", "test", "test_ood"):
         (save_path / split).mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -102,9 +106,14 @@ def dl_gas_foil_bearing(
                 continue  # skip manual recordings
             parsed_files.append({"full_path": file, "trajectory": trajectory, "load_str": load_str})
 
-        file_list = [f["full_path"] for f in parsed_files]
+        test_ood_paths = []
         strata_labels = []
+        file_list = []
         for f in parsed_files:
+            if f["trajectory"] in _TEST_OOD_TRAJECTORIES:
+                test_ood_paths.append(f["full_path"])
+                continue  # held out entirely, so it must not enter the stratified split
+            file_list.append(f["full_path"])
             if "Hold" in f["trajectory"]:
                 strata_labels.append(f"Hold_{f['load_str']}")
             elif "Random" in f["trajectory"]:
@@ -119,7 +128,7 @@ def dl_gas_foil_bearing(
             train_valid_paths, train_valid_labels, test_size=0.25, random_state=42, stratify=train_valid_labels
         )
 
-        for paths, subdir in [(train_paths, "train"), (valid_paths, "valid"), (test_basic_paths, "test")]:
+        for paths, subdir in [(train_paths, "train"), (valid_paths, "valid"), (test_basic_paths, "test"), (test_ood_paths, "test_ood")]:
             for path in tqdm(paths, desc=f"Copying {subdir} files"):
                 _copy_with_idb_attrs(path, save_path / subdir)
 
@@ -146,8 +155,7 @@ _gas_foil_bearing = dict(
     y_cols=["IAS"],
     train=[(gas_foil_bearing_dataset, "train/*.hdf5")],
     valid=[(gas_foil_bearing_dataset, "valid/*.hdf5")],
-    # This dataset has no `wear` condition, so no such set is declared.
-    test_sets=ias_test_sets(gas_foil_bearing_dataset, wear=False),
+    test_sets=ias_test_sets(gas_foil_bearing_dataset),
 )
 
 BenchmarkGasFoilBearing_Estimation = BenchmarkSpec(

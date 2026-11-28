@@ -784,31 +784,31 @@ def test_save_signals_hdf5_attrs_roundtrip(tmp_path):
 
 def test_ias_test_sets_patterns():
     sets = _common.ias_test_sets(ball_bearing_dataset)
-    expected = ["basic", "wear"] + [
+    expected = ["basic", "ood"] + [
         f"disturbed_{level}dB_{variant}"
         for level in _common.DISTURBANCE_LEVELS
         for variant in _common.DISTURBANCE_VARIANTS
     ]
     assert list(sets) == expected
     assert sets["basic"] == [(ball_bearing_dataset, "test/*.hdf5")]
-    assert sets["wear"] == [(ball_bearing_dataset, "test_wear/*.hdf5")]
+    assert sets["ood"] == [(ball_bearing_dataset, "test_ood/*.hdf5")]
     assert sets["disturbed_7.5dB_combined"] == [(ball_bearing_dataset, "test_disturbed_7.5dB_combined/*.hdf5")]
     assert sets["disturbed_0dB_harmonic"] == [(ball_bearing_dataset, "test_disturbed_0dB_harmonic/*.hdf5")]
-    # A dataset without a wear condition simply does not declare the set.
-    assert "wear" not in _common.ias_test_sets(ball_bearing_dataset, wear=False)
+    # A dataset without an ood condition simply does not declare the set.
+    assert "ood" not in _common.ias_test_sets(ball_bearing_dataset, ood=False)
 
 
 _SYNTH_SAMPLES = 4000  # 4 s at fs=1000: 20 revolutions at 5 Hz, enough frame pairs for the disturbance writer
 
 
-def _build_synthetic_ias_dataset(ds, with_wear=True):
+def _build_synthetic_ias_dataset(ds, with_ood=True):
     """A small ball-bearing-shaped dataset with known IAS targets, marked prepared."""
     speed = np.full(_SYNTH_SAMPLES, 5.0)
     for split, n_files in {"train": 1, "valid": 1, "test": 2}.items():
         for i in range(n_files):
             _write_ias_file(ds / split / f"{split}_{i}.hdf5", speed, {"Acc_x": _machine(speed, 1000.0, seed=i)})
-    if with_wear:
-        _write_ias_file(ds / "test_wear" / "wear_0.hdf5", np.full(_SYNTH_SAMPLES, 9.0), {"Acc_x": _machine(speed, 1000.0)})
+    if with_ood:
+        _write_ias_file(ds / "test_ood" / "ood_0.hdf5", np.full(_SYNTH_SAMPLES, 9.0), {"Acc_x": _machine(speed, 1000.0)})
     _common.write_disturbed_test_sets(ds, vib_keys=["Acc_x"], settings=HarmonicSettings(segment_revs=4), noise_levels=[15])
     # Adopt the synthetic data as a prepared cache. This must carry the dataset's *current*
     # version, or `ensure_exists` treats the directory as stale and downloads the real 200 kHz
@@ -821,7 +821,7 @@ def _narrowed_test_sets():
     return {
         name: patterns
         for name, patterns in _common.ias_test_sets(ball_bearing_dataset).items()
-        if name in ("basic", "wear", "disturbed_15dB_combined")
+        if name in ("basic", "ood", "disturbed_15dB_combined")
     }
 
 
@@ -847,8 +847,8 @@ def test_run_benchmark_on_synthetic_ias_dataset(tmp_path, monkeypatch):
     # Headline = basic pooled MAE; the zero-model's per-window error is the constant IAS.
     assert result["metric_name"] == "mae"
     assert result["metric_score"] == pytest.approx(5.0, abs=1e-5)
-    assert set(result["test_sets"]) == {"basic", "wear", "disturbed_15dB_combined"}
-    assert result["test_sets"]["wear"]["mae"] == pytest.approx(9.0, abs=1e-5)
+    assert set(result["test_sets"]) == {"basic", "ood", "disturbed_15dB_combined"}
+    assert result["test_sets"]["ood"]["mae"] == pytest.approx(9.0, abs=1e-5)
     assert result["test_sets"]["disturbed_15dB_combined"]["mae"] == pytest.approx(5.0, abs=1e-5)
     # The pooled statistics ride alongside the headline MAE on every set.
     basic = result["test_sets"]["basic"]
@@ -880,9 +880,9 @@ def test_run_simulation_benchmark_on_synthetic_ias_dataset(tmp_path, monkeypatch
     assert result["benchmark_type"] == "Simulation"
     assert result["metric_name"] == "mae"
     assert result["metric_score"] == pytest.approx(5.0, abs=1e-5)  # |0 - 5| per sample
-    assert set(result["test_sets"]) == {"basic", "wear", "disturbed_15dB_combined"}
+    assert set(result["test_sets"]) == {"basic", "ood", "disturbed_15dB_combined"}
     assert set(result["test_sets"]["basic"]) == {"mae"}
-    assert result["test_sets"]["wear"]["mae"] == pytest.approx(9.0, abs=1e-5)
+    assert result["test_sets"]["ood"]["mae"] == pytest.approx(9.0, abs=1e-5)
 
 
 def test_run_gridwise_benchmark_on_synthetic_ias_dataset(tmp_path, monkeypatch):
@@ -907,12 +907,12 @@ def test_run_gridwise_benchmark_on_synthetic_ias_dataset(tmp_path, monkeypatch):
     result = idb.run_benchmark(spec, build_model, seed=0)
 
     # Headline = basic acceptable-point percentage: 5.02 vs 5 Hz is 0.004 orders off (< 0.01),
-    # vs the 9 Hz wear set 0.44 orders off.
+    # vs the 9 Hz ood set 0.44 orders off.
     assert result["metric_name"] == "rel_acceptable_perc"
     assert result["metric_score"] == pytest.approx(100.0)
-    assert set(result["test_sets"]) == {"basic", "wear", "disturbed_15dB_combined"}
-    assert result["test_sets"]["wear"]["rel_acceptable_perc"] == pytest.approx(0.0)
-    assert result["test_sets"]["wear"]["mae"] == pytest.approx(3.98, abs=1e-5)
+    assert set(result["test_sets"]) == {"basic", "ood", "disturbed_15dB_combined"}
+    assert result["test_sets"]["ood"]["rel_acceptable_perc"] == pytest.approx(0.0)
+    assert result["test_sets"]["ood"]["mae"] == pytest.approx(3.98, abs=1e-5)
     basic = result["test_sets"]["basic"]
     assert set(basic) == {"mae", "medae", "std", "max", "rel_acceptable_perc"}
     assert basic["mae"] == pytest.approx(0.02, abs=1e-5)
@@ -970,20 +970,20 @@ def test_gridwise_estimation_rejects_multi_output_specs(tmp_path, monkeypatch):
         idb.run_benchmark(spec, build_model, seed=0)
 
 
-def test_missing_wear_dir_fails_loudly(tmp_path, monkeypatch):
-    """Declaring `wear` against a dataset without the condition must raise, not skip."""
+def test_missing_ood_dir_fails_loudly(tmp_path, monkeypatch):
+    """Declaring `ood` against a dataset without the condition must raise, not skip."""
     monkeypatch.setenv("IDENTIBENCH_DATA_ROOT", str(tmp_path))
-    _build_synthetic_ias_dataset(tmp_path / "ball_bearing", with_wear=False)
+    _build_synthetic_ias_dataset(tmp_path / "ball_bearing", with_ood=False)
     spec = dataclasses.replace(
         BenchmarkBallBearing_Estimation,
         task=WindowedEstimation(window_sec=0.05),
-        test_sets=_narrowed_test_sets(),  # declares wear
+        test_sets=_narrowed_test_sets(),  # declares ood
     )
 
     def build_model(context):
         return lambda u, y_init, attrs: np.zeros((len(u), 1))
 
-    with pytest.raises(FileNotFoundError, match="test_wear"):
+    with pytest.raises(FileNotFoundError, match="test_ood"):
         idb.run_benchmark(spec, build_model, seed=0)
 
 

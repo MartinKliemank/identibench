@@ -206,8 +206,8 @@ method is starved — e.g. MOPA needs ~2.5 s on the gas-foil bearing, which a
 revolution-based window would have cut to a fraction of that.
 
 Each dataset exposes several named test conditions: `basic` (in-distribution —
-the headline `metric_score`), `wear` (out-of-distribution fault severities;
-absent for the gas foil bearing), and `disturbed_{15,7.5,0,-7.5}dB_{variant}`
+the headline `metric_score`), `ood` (out-of-distribution: unseen fault
+severities, or unseen speed trajectories for the gas foil bearing), and `disturbed_{15,7.5,0,-7.5}dB_{variant}`
 (copies of `basic` with reproducible synthetic disturbances at decreasing SNR).
 The variants are `combined` (all three components, noise power split evenly),
 `harmonic` (a nearby machine: a line comb running at the speed profile of

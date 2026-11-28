@@ -107,8 +107,8 @@ _FILES_TO_SHIFT = {
     "gear_pitting_L_speed_circulation_10Nm-3000rpm",
 }
 
-# Fault types whose M/H severities form the out-of-distribution wear set (verbatim).
-_TEST_WEAR_TYPES = {"teeth_break", "miss_teeth", "teeth_break_and_bearing_inner", "teeth_break_and_bearing_outer"}
+# Fault types whose M/H severities form the out-of-distribution (ood) set (verbatim).
+_TEST_OOD_TYPES = {"teeth_break", "miss_teeth", "teeth_break_and_bearing_inner", "teeth_break_and_bearing_outer"}
 
 _FILENAME_PATTERN = re.compile(
     r"""
@@ -130,7 +130,7 @@ def dl_parallel_gearbox(
     """Download, preprocess (encoder → IAS), split, and add disturbed test sets."""
     train_test_split = _require_sklearn()
     save_path = Path(save_path)
-    for split in ("train", "valid", "test", "test_wear"):
+    for split in ("train", "valid", "test", "test_ood"):
         (save_path / split).mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -155,12 +155,12 @@ def dl_parallel_gearbox(
             fault_type, severity, mode = match.group(1), match.group(2) or "N/A", match.group(3)
             parsed_files.append({"full_path": fpath, "fault_type": fault_type, "severity": severity, "mode": mode})
 
-        test_wear_paths = []
+        test_ood_paths = []
         strata_labels = []
         file_list = []
         for f in parsed_files:
-            if f["fault_type"] in _TEST_WEAR_TYPES and not f["severity"] == "L":
-                test_wear_paths.append(f["full_path"])
+            if f["fault_type"] in _TEST_OOD_TYPES and not f["severity"] == "L":
+                test_ood_paths.append(f["full_path"])
             else:
                 strata_labels.append(f"{f['fault_type']}_{f['severity']}_{f['mode']}")
                 file_list.append(f["full_path"])
@@ -179,7 +179,7 @@ def dl_parallel_gearbox(
             (train_paths, "train"),
             (valid_paths, "valid"),
             (test_basic_paths, "test"),
-            (test_wear_paths, "test_wear"),
+            (test_ood_paths, "test_ood"),
         ]:
             for path in paths:
                 split_of[path] = subdir

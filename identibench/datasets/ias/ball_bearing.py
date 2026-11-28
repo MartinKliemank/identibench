@@ -50,7 +50,7 @@ _PPR = 1024
 _IAS_BANDWIDTH_HZ = 30.05 * _CUTOFF_ORDER  # 129.9 Hz
 
 # Fixed upstream split (verbatim): file stems of the basic test and valid sets;
-# C* recordings (worn bearings) form the out-of-distribution wear set.
+# C* recordings (worn bearings) form the out-of-distribution (ood) set.
 _BASIC_TEST_FILES = {"H-D-1", "H-C-3", "I-A-3", "I-B-1", "O-B-2", "B-A-2", "B-C-3", "O-D-2", "O-A-1"}
 _VALID_FILES = {"H-A-2", "H-C-1", "I-D-1", "O-A-3", "O-D-1", "B-D-1", "B-B-3", "I-C-2", "I-B-2"}
 
@@ -68,7 +68,7 @@ def dl_ball_bearing(
     :func:`._common.encoder_pulse_to_ias`.
     """
     save_path = Path(save_path)
-    for split in ("train", "valid", "test", "test_wear"):
+    for split in ("train", "valid", "test", "test_ood"):
         (save_path / split).mkdir(parents=True, exist_ok=True)
 
     fs = 2e5
@@ -81,7 +81,7 @@ def dl_ball_bearing(
         mat_files = sorted(temp_dir.rglob("*.mat"))
         for file in tqdm(mat_files, desc="Preprocessing .mat files", unit="file"):
             if file.name[0] == "C":
-                target_subdir = "test_wear"
+                target_subdir = "test_ood"
             elif file.stem in _BASIC_TEST_FILES:
                 target_subdir = "test"
             elif file.stem in _VALID_FILES:

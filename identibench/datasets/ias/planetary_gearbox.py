@@ -568,17 +568,17 @@ def calibrate_zebra(
 # ───────────────────────── reconstruction ─────────────────────────
 
 
-def angle_domain_ias(t: np.ndarray, idx: np.ndarray, template: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def angle_domain_ias(t: np.ndarray, idx: np.ndarray, template: np.ndarray) -> tuple[np.ndarray, slice]:
     """Unfiltered IAS (Hz), uniformly sampled in angle at ``len(template)`` points per revolution.
 
     The labelled stripes give angle at irregular times. Monotone PCHIP through them, evaluated at
     a uniform *angle* grid, inverts that into the time of each angle step; differencing gives a
     rate that is genuinely uniform in angle, which is what makes an order-domain filter
-    well-posed. Timing jitter passes through this with the first-difference ``sin^2(pi k / ppr)``
-    shape of a plain encoder.
-
+    well-posed. The reciprocal of the IAS is filtered, as here, jitter enters linearly. 
+    The rate is then interpolated onto the recording's own time grid.
+    
     Returns:
-        ``(ias, t_mid)`` -- the rate over each angle step, and the time at the middle of each step.
+        ``(ias, sl)`` -- the rate over each angle step, and the ``slice`` of the time grid at the middle of each step.
     """
     angle = _theta(idx, template)
     n_per_rev = len(template)
@@ -602,7 +602,7 @@ def reconstruct_ias(
         ``slice`` of that grid, to be applied to the vibration channels as well.
     """
     ias_angle_domain, t_mid = angle_domain_ias(t, idx, template)
-    ias_filt = order_domain_lowpass(ias_angle_domain, _CUTOFF_ORDER, len(template))
+    ias_filt = 1 / order_domain_lowpass(1 / ias_angle_domain, _CUTOFF_ORDER, len(template)) # filter reciprocal
 
     t_grid = np.arange(signal_len) / fs
     sl = slice(

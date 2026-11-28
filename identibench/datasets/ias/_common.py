@@ -202,10 +202,10 @@ def encoder_pulse_to_ias(
 ) -> tuple[np.ndarray, slice]:
     """Instantaneous angular speed (Hz) from an analog encoder pulse train.
 
-    Rising edges give per-pulse periods; their reciprocal is the rate. Each period is
+    Rising edges give per-pulse periods. Each period is
     centred between its two edges, i.e. at angle ``(k - 0.5) / ppr``, so the rate sequence
-    is *already* uniform in angle and :func:`order_domain_lowpass` applies to it directly,
-    with no angle-domain resampling needed. It is then interpolated onto the recording's own
+    is uniform in angle and :func:`order_domain_lowpass` applies to it directly,
+    with no angle-domain resampling needed. The periods' reciprocal is then the IAS. Which is interpolated onto the recording's own
     sample grid.
 
     Args:
@@ -223,7 +223,7 @@ def encoder_pulse_to_ias(
     pulse_times = rising_edge_times(signal, fs)
     periods = np.diff(pulse_times)
     corrected_t = pulse_times[1:] - periods / 2
-    ias = order_domain_lowpass(1 / periods / pulses_per_revolution, cutoff_order, pulses_per_revolution)
+    ias = 1 / order_domain_lowpass(periods, cutoff_order, pulses_per_revolution) / pulses_per_revolution # filter before reciprocal
 
     t = np.arange(len(signal)) / fs
     sl = slice(

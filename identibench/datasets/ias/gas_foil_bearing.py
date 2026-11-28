@@ -46,6 +46,14 @@ _FILENAME_PATTERN = re.compile(r"^(Load\d+)_(\d+(?:_\d+)*)_([A-Za-z][A-Za-z0-9]*
 # time domain (zero-phase 4th-order Butterworth, -3 dB at 40 Hz).
 _IAS_BANDWIDTH_HZ = 40.0
 
+# Speeds at or below this are not scored by the GridwiseEstimation headline. Unlike the other three datasets
+# (1 Hz, `_common.MIN_SCORED_IAS_HZ`), this label degrades at low speed: the converter updates only once per
+# pulse (4 per revolution) and its lag is corrected by a model. Below 6 Hz there are no confirmed whole
+# revolutions to measure the label against, and at 6-10 Hz its expanded uncertainty (k = 2) is ~1.7 %, above
+# the headline's 1 % tolerance; from 10 Hz it is <= ~0.94 % (plotting_00_gas_foil_bearing_demo.ipynb, cell 39).
+# Drops ~1.3 % of the rotating points (run-up starts and run-down ends).
+_MIN_SCORED_IAS_HZ = 10.0
+
 
 def _copy_with_idb_attrs(src: Path, dest_dir: Path) -> None:
     """Copy one pre-converted file, renaming ``sampling_rate`` → ``fs``, synthesizing
@@ -160,7 +168,8 @@ BenchmarkGasFoilBearing_GridwiseEstimation = BenchmarkSpec(
     # standstill at each end for exactly this, so raising window_sec would drop run-up/run-down samples.
     # step_sec: Nyquist for the label's retained band, _IAS_BANDWIDTH_HZ = 40.0 Hz -> <12.5 ms,
     # taken at 3 ms to match the other fast datasets (~4x margin).
-    task=GridwiseEstimation(window_sec=3.0, step_sec=0.003, min_targ=MIN_SCORED_IAS_HZ),
+    # min_targ: 10 Hz, not the common 1 Hz -- see _MIN_SCORED_IAS_HZ.
+    task=GridwiseEstimation(window_sec=3.0, step_sec=0.003, min_targ=_MIN_SCORED_IAS_HZ),
     **_gas_foil_bearing,
 )
 

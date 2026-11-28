@@ -358,7 +358,7 @@ class GridwiseEstimation:
     step_sec: float  # Spacing between successive query points, in seconds.
     rel_tol: float = 0.01  # Relative error below which a query point counts as acceptable (headline).
     # Targets at or below this (y units) are not scored by the headline, as the relative error blows up near
-    # zero; the IAS specs pass ias._common.MIN_SCORED_IAS_HZ.
+    # zero; the IAS specs pass ias._common.MIN_SCORED_IAS_HZ (the gas foil bearing its own, higher floor).
     min_targ: float = 0.0
 
     def __post_init__(self):
